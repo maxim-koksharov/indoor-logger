@@ -1,41 +1,63 @@
+// main/main.cpp
 
-#include <stdio.h>
+#include "OLEDDriver.hpp"
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <driver/gpio.h>
-
-#include <ssd1306.h>
-#include <driver/i2c.h>
-#include <esp_err.h>
+// Обязательная обертка для C-заголовков FreeRTOS
+extern "C" {
+    #include "freertos/FreeRTOS.h"
+    #include "freertos/task.h"
+}
 
 #define SCL_PIN 5
 #define SDA_PIN 4
-#define DISPLAY_WIDTH 128
-#define DISPLAY_HEIGHT 64
+#define I2C_BUS 0
 
-void app_main()
-{
-    // init i2c
-    int i2c_master_port = I2C_NUM_0;
-    i2c_config_t conf;
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = SDA_PIN;
-    conf.sda_pullup_en = 1;
-    conf.scl_io_num = SCL_PIN;
-    conf.scl_pullup_en = 1;
-    conf.clk_stretch_tick = 300;
-    ESP_ERROR_CHECK(i2c_driver_install(i2c_master_port, conf.mode));
-    ESP_ERROR_CHECK(i2c_param_config(i2c_master_port, &conf));
+// 1. Создаем глобальный объект драйвера
+// Пин D1 (GPIO5) = SCL, Пин D2 (GPIO4) = SDA (типично для NodeMCU/ESP8266)
+OLEDDriver oled(5, 4); 
 
-    // init ssd1306
-    ssd1306_t dev = {
-        .i2c_port = i2c_master_port,
-        .i2c_addr = SSD1306_I2C_ADDR_0,
-        .screen = SSD1306_SCREEN, // or SH1106_SCREEN
-        .width = DISPLAY_WIDTH,
-        .height = DISPLAY_HEIGHT};
+// 2. Создаем задачу FreeRTOS для работы с дисплеем
+// (Рекомендуется выполнять длительные операции в отдельной задаче)
+void oled_test_task(void *pvParameter) {
+    oled.initialize();
+    
+    while(1) {
+        oled.clear();
+        
+        // 1. Рисуем текст (первая строка)
+        // oled.drawText(0, 0, "Hello from C++!");
+        
+        // 2. Рисуем вторую строку
+        // oled.drawText(0, 16, "RTOS SSD1306"); 
 
-    ssd1306_init(&dev);
+        // 3. Рисуем простую фигуру (точка)
+        // for (int i = 0; i < 128; i += 5) {
+        //     oled.drawPixel(i, 32);
+        // }
 
+        // 4. Отправляем буфер на дисплей
+        // oled.refresh();
+        
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Задержка 2 секунды
+
+        oled.draw_circle(10, 20, 5);
+
+        // Пример прокрутки текста
+        // oled.clear();
+        // oled.drawText(0, 0, "Scrolling test...");
+        // oled.drawText(0, 16, "Portugal! *");
+        // oled.refresh();
+        vTaskDelay(pdMS_TO_TICKS(200000));
+
+        oled.draw_circle(10, 20, 10);
+    }
+
+    vTaskDelete(NULL);
+}
+
+
+// Точка входа в RTOS SDK
+extern "C" void app_main(void) {
+    // Создаем задачу FreeRTOS
+    xTaskCreate(oled_test_task, "oled_test", 4096, NULL, 5, NULL);
 }
