@@ -1,3 +1,11 @@
+# Build artefacts
+build/
+bin/
+sdkconfig*
+
+# Editor files
+.vscode/
+*.swp
 # Prerequisites
 *.d
 
