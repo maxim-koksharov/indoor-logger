@@ -95,6 +95,10 @@
     #include "data/font_terminus_bold_16x32_koi8_r.h"
 #endif
 
+#if FONTS_COMPACT_6X8
+    #include "data/font_compact_6x8.h"
+#endif
+
 /////////////////////////////////////////////
 
 // FIXME: this declaration is noisy
@@ -234,6 +238,12 @@ const font_info_t *font_builtin_fonts[] =
     [FONT_FACE_TERMINUS_BOLD_16X32_KOI8_R] = &_fonts_terminus_bold_16x32_koi8_r_info,
 #else
     [FONT_FACE_TERMINUS_BOLD_16X32_KOI8_R] = NULL,
+#endif
+
+#if FONTS_COMPACT_6X8
+    [FONT_FACE_COMPACT_6X8] = &_fonts_compact_6x8_info,
+#else
+    [FONT_FACE_COMPACT_6X8] = NULL,
 #endif
 };
 

@@ -6,11 +6,11 @@ extern "C" {
     #include "ssd1306.h"
 }
 
-constexpr uint32_t oled_sie = 128 * 64;
+constexpr uint32_t oled_size = 128 * 64;
 
 class OLEDDriver {
 public:
-    OLEDDriver(int sda_pin, int scl_pin, uint8_t i2c_addr = 0x3C);
+    OLEDDriver(int sda_pin, int scl_pin, uint8_t i2c_addr = SSD1306_I2C_ADDR_1);
     
     // Инициализация I2C и дисплея
     void initialize(); 
@@ -31,5 +31,5 @@ private:
     int _sda_pin;
     int _scl_pin;
     uint8_t _i2c_addr;
-    uint8_t framebuffer[oled_sie];
+    uint8_t framebuffer[oled_size];
 };

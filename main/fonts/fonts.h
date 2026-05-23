@@ -47,6 +47,8 @@ typedef enum
     FONT_FACE_TERMINUS_BOLD_14X28_KOI8_R,
     FONT_FACE_TERMINUS_16X32_KOI8_R,
     FONT_FACE_TERMINUS_BOLD_16X32_KOI8_R,
+
+    FONT_FACE_COMPACT_6X8,
 } font_face_t;
 
 /**
@@ -65,8 +67,8 @@ typedef struct _font_info
 {
     uint8_t height;                           ///< Character height in pixel, all characters have same height
     uint8_t c;                                ///< Simulation of "C" width in TrueType term, the space between adjacent characters
-    char char_start;                          ///< First character
-    char char_end;                            ///< Last character
+    uint8_t char_start;                         ///< First character
+    uint8_t char_end;                           ///< Last character
     const font_char_desc_t *char_descriptors; ///< descriptor for each character
     const uint8_t *bitmap;                    ///< Character bitmap
 } font_info_t;
@@ -85,9 +87,10 @@ extern const size_t font_builtin_fonts_count;
  */
 inline const font_char_desc_t *font_get_char_desc(const font_info_t *fnt, char c)
 {
-    return c < fnt->char_start || c > fnt->char_end
+    uint8_t uc = (uint8_t)c;
+    return uc < fnt->char_start || uc > fnt->char_end
         ? NULL
-        : fnt->char_descriptors + c - fnt->char_start;
+        : fnt->char_descriptors + uc - fnt->char_start;
 }
 
 /**

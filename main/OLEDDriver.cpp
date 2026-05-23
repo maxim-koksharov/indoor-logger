@@ -19,18 +19,18 @@ OLEDDriver::OLEDDriver(int sda_pin, int scl_pin, uint8_t i2c_addr)
 
 void OLEDDriver::initialize() {
     // 1. Инициализация I2C мастера (нативный вызов SDK)
-    // i2c_config_t conf = {};
-    // conf.mode = I2C_MODE_MASTER;
-    // conf.sda_io_num = static_cast<gpio_num_t>(_sda_pin);
-    // conf.scl_io_num = static_cast<gpio_num_t>(_scl_pin);
-    // conf.sda_pullup_en = static_cast<gpio_pullup_t>(1);
-    // conf.scl_pullup_en = static_cast<gpio_pullup_t>(1);
-    // conf.clk_stretch_tick = 400000;
+    i2c_config_t conf = {};
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = static_cast<gpio_num_t>(_sda_pin);
+    conf.scl_io_num = static_cast<gpio_num_t>(_scl_pin);
+    conf.sda_pullup_en = static_cast<gpio_pullup_t>(1);
+    conf.scl_pullup_en = static_cast<gpio_pullup_t>(1);
+    conf.clk_stretch_tick = 300;
     
-    // i2c_param_config(I2C_NUM_0, &conf);
-    // i2c_driver_install(I2C_NUM_0, conf.mode);
+    i2c_driver_install(I2C_NUM_0, conf.mode);
+    i2c_param_config(I2C_NUM_0, &conf);
 
-    for(uint32_t i = 0; i < oled_sie; i++) {
+    for(uint32_t i = 0; i < oled_size; i++) {
         framebuffer[i] = 0;
     }
 
