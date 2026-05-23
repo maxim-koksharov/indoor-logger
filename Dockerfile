@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     xz-utils \
+    xxd \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
