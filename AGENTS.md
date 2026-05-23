@@ -46,6 +46,8 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 
 All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}` when included from C++ files.
 
+If you need to verify your changes, use command "Flash"
+
 ## Hardware
 
 ### Wemos D1 Mini
@@ -87,7 +89,7 @@ Both sensors share the same I2C bus — each has a unique address, so they coexi
 | Property | Value |
 |---|---|
 | Controller | SSD1306 |
-| Resolution | 128 × 32 pixels |
+| Resolution | 128 × 64 pixels |
 | Interface | I2C |
 | I2C address | `0x3C` (default) or `0x3D` (if A0 pin pulled high) |
 | Supply voltage | 3.3 V – 5 V (module has onboard regulator) |
@@ -118,6 +120,33 @@ Wemos D1 Mini                    I2C Bus (shared SDA + SCL)
 | Ground | GND | — |
 
 **Important:** All modules operate at 3.3 V logic. The Wemos D1 Mini GPIO pins are 3.3 V, so no level shifters are needed. Power all modules from the Wemos 3V3 pin (check total current draw — OLED ~20 mA, sensors ~1 mA).
+
+### Tactile Button (Display Wake)
+
+| Property | Value |
+|---|---|
+| Type | Momentary tactile switch (NO - normally open) |
+| GPIO | D6 (GPIO12) |
+| Wiring | One leg → GPIO12, other leg → GND |
+| Pull-up | Internal pull-up resistor enabled |
+| Active | Low (pressed = GPIO reads 0) |
+| Debounce | 50 ms software debounce |
+| Behavior | Press → display ON for 10 seconds, then auto-off |
+
+```
+Wemos D1 Mini
+┌─────────────┐
+│ D6 (GPIO12) ├────┐
+│ GND         ├────┤
+└─────────────┘    │
+                ┌──┴──┐
+                │ BTN │  (tactile switch)
+                └──┬──┘
+                   │
+                 (both legs connected as shown)
+```
+
+**Note:** GPIO12 (D6) is chosen because it has no special boot-strapping requirements. Avoid GPIO0 (D3) as it affects boot mode.
 
 ### I2C device addresses on the bus
 
