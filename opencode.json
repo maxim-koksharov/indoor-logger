@@ -1,0 +1,125 @@
+
+{
+	"$schema": "https://opencode.ai/config.json",
+	"instructions": [
+		"AGENTS.md"
+	],
+	"permission": {
+		"": "ask",
+		"read": {
+			"": "allow",
+			"/esp/ESP8266_RTOS_SDK/**": "allow",
+			".env": "deny",
+			".env.": "deny",
+			"/.env": "deny",
+			"/.env.": "deny",
+			".pem": "deny",
+			".key": "deny",
+			"id_rsa*": "deny",
+			"/id_rsa*": "deny"
+		},
+		"edit": {
+			"*": "ask",
+			"main/": "allow",
+			"main/include/": "allow",
+			"main/fonts/": "allow",
+			"CMakeLists.txt": "allow",
+			"sdkconfig": "allow",
+			"sdkconfig.defaults": "allow",
+			"partitions.csv": "allow",
+			"README.md": "allow",
+			"AGENTS.md": "allow",
+			"opencode.json": "allow",
+			".env": "deny",
+			".env.": "deny",
+			"/.env": "deny",
+			"/.env.": "deny"
+		},
+		"bash": {
+			"*": "ask",
+			"pwd": "allow",
+			"ls": "allow",
+			"ls *": "allow",
+			"find . *": "allow",
+			"git status": "allow",
+			"git status ": "allow",
+			"git diff": "allow",
+			"git diff ": "allow",
+			"git log ": "allow",
+			"export IDF_PATH=*": "allow",
+			"idf.py build": "allow",
+			"idf.py set-target esp8266": "allow",
+			"idf.py set-target esp32": "allow",
+			"idf.py set-target esp32s3": "allow",
+			"idf.py set-target esp32c3": "allow",
+			"idf.py menuconfig": "allow",
+			"idf.py -p /dev/ttyUSB0 flash": "ask",
+			"idf.py -p /dev/ttyUSB0 monitor": "ask",
+			"idf.py -p /dev/ttyUSB0 flash monitor": "ask",
+			"idf.py -p /dev/ttyUSB0 erase_flash": "ask",
+			"idf.py flash": "ask",
+			"idf.py flash monitor": "ask",
+			"idf.py monitor": "ask",
+			"idf.py erase_flash": "ask",
+			"./scripts/build.sh": "allow",
+			"./scripts/flash.sh": "ask",
+			"./scripts/monitor.sh": "ask",
+			"rm ": "ask",
+			"rm -r ": "ask",
+			"rm -rf ": "ask",
+			"make": "deny",
+			"make *": "deny",
+			"sudo ": "deny",
+			"su ": "deny",
+			"chmod 777 ": "deny",
+			"chown ": "deny",
+			"curl ": "ask",
+			"wget ": "ask",
+			"ssh ": "deny",
+			"scp ": "deny",
+			"rsync ": "deny",
+			"cat ~/.ssh/": "deny",
+			"cat $HOME/.ssh/": "deny",
+			"cat ~/.aws/": "deny",
+			"cat $HOME/.aws/": "deny",
+			"cd *": "allow",
+			" ../": "ask",
+			" ~/ ": "ask",
+			" ~/.ssh/": "deny",
+			" $HOME/.ssh/": "deny"
+		},
+		"external_directory": {
+			"": "deny",
+			"/esp/ESP8266_RTOS_SDK/**": "allow"
+		},
+		"webfetch": "ask",
+		"websearch": "ask"
+	},
+	"command": {
+		"build": {
+			"description": "Build the firmware",
+			"prompt": "Run idf.py build to compile the ESP8266 firmware. Check for any compilation errors and report them.",
+			"template": "idf.py build"
+		},
+		"flash": {
+			"description": "Flash firmware to ESP8266",
+			"prompt": "Flash the built firmware to the ESP8266 via /dev/ttyUSB0. Use idf.py -p /dev/ttyUSB0 flash.",
+			"template": "idf.py -p /dev/ttyUSB0 flash"
+		},
+		"monitor": {
+			"description": "Monitor ESP8266 serial output",
+			"prompt": "Start the serial monitor at 74880 baud to view ESP8266 output. Use idf.py -p /dev/ttyUSB0 monitor.",
+			"template": "idf.py -p /dev/ttyUSB0 monitor"
+		},
+		"flash-monitor": {
+			"description": "Flash and monitor ESP8266",
+			"prompt": "Flash the firmware and immediately start monitoring serial output. Use idf.py -p /dev/ttyUSB0 flash monitor.",
+			"template": "idf.py -p /dev/ttyUSB0 flash monitor"
+		},
+		"clean": {
+			"description": "Clean build directory",
+			"prompt": "Remove the build directory to force a full rebuild. Run rm -rf build/.",
+			"template": "rm -rf build/"
+		}
+	}
+}
