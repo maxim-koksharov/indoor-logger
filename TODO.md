@@ -1,86 +1,173 @@
 # TODO
 
-## C++ Migration Assessment
+## Phase 1: Monorepo Restructuring
 
-**Possible but constrained.** The ESP8266 toolchain links `-lstdc++` which pulls in
-`libstdc++.a(guard.o)` — that object references `pthread_cond_*` symbols. The fix
-(`pthread_stubs.c`) is already in place. With the stubs, components can be written
-in C++ freely.
+### New project structure
+```
+/esp/project/
+├── CMakeLists.txt              # Root CMake (includes ESP-IDF)
+├── components/                 # Shared libraries
+│   ├── display/                # SSD1306 OLED driver + Display wrapper
+│   │   ├── CMakeLists.txt
+│   │   ├── ssd1306.c
+│   │   ├── Display.c
+│   │   ├── pthread_stubs.c
+│   │   └── include/
+│   │       ├── ssd1306.h
+│   │       └── Display.h
+│   ├── sensors/                # ENS160 + AHT21 sensor drivers
+│   │   ├── CMakeLists.txt
+│   │   ├── ens160.c
+│   │   ├── aht21.c
+│   │   └── include/
+│   │       ├── ens160.h
+│   │       └── aht21.h
+│   ├── fonts/                  # Font library
+│   │   ├── CMakeLists.txt
+│   │   ├── fonts.c
+│   │   ├── fonts.h
+│   │   └── data/
+│   └── wifi/                   # WiFi connection helper (new)
+│       ├── CMakeLists.txt
+│       ├── wifi_manager.c
+│       └── include/
+│           └── wifi_manager.h
+├── apps/
+│   ├── server/                 # Server application (16MB ESP8266)
+│   │   ├── CMakeLists.txt
+│   │   ├── main/
+│   │   │   └── main.c
+│   │   └── sdkconfig
+│   └── client/                 # Client application (4MB/16MB ESP8266)
+│       ├── CMakeLists.txt
+│       ├── main/
+│       │   └── main.c
+│       └── sdkconfig
+└── TODO.md
+```
 
-**Costs:**
-- Extra 50–70 KB flash for `libstdc++.a` (significant on 2 MB)
-- Higher IRAM/DRAM usage from exception handling support even if unused
-- Static constructors consume RAM permanently
-- `pthread_stubs.c` is a hack — real pthreads conflict with FreeRTOS
+### Tasks
+- [x] Move sensor drivers from `main/` to `components/sensors/`
+- [x] Create `components/wifi/` with WiFi connection helper
+- [x] Create `apps/server/` directory structure
+- [x] Create `apps/client/` directory structure
+- [x] Update root `CMakeLists.txt` for monorepo
+- [x] Create `apps/server/CMakeLists.txt` with proper component dependencies
+- [x] Create `apps/client/CMakeLists.txt` with proper component dependencies
+- [x] Create `apps/server/sdkconfig` (16MB flash, server settings)
+- [x] Create `apps/client/sdkconfig` (4MB/16MB flash, client settings)
+- [x] Move `main/main.c` to `apps/client/main/main.c` as baseline
+- [x] Create `apps/server/main/main.c` with server entry point
+- [x] Create `apps/client/main/main.c` with client entry point
+- [x] Remove old `main/` directory
+- [x] Test build: `cd apps/client && idf.py build`
+- [x] Test build: `cd apps/server && idf.py build`
+- [ ] Remove old `main/` directory
+- [ ] Test build: `cd apps/client && idf.py build`
+- [ ] Test build: `cd apps/server && idf.py build`
 
-**Verdict:** Keep entry point (`main/`) in C. Use C++ only for sensor drivers /
-business logic in `components/` where polymorphism or RAII actually helps.
-The display library is fine in C (thin wrapper over C driver).
+## Phase 2: WiFi Infrastructure
 
----
+### WiFi Manager Component
+- [ ] Implement `wifi_manager_init()` with STA mode
+- [ ] Implement `wifi_manager_init_ap()` for AP mode (server fallback)
+- [ ] Add WiFi event handlers for connection/disconnection
+- [ ] Add NVS storage for WiFi credentials
+- [ ] Add auto-reconnect with exponential backoff
 
-## Quality (5-star project)
+### Server WiFi Setup
+- [ ] Server starts in AP mode by default (creates its own network)
+- [ ] Server assigns static IP (192.168.4.1)
+- [ ] Server can optionally connect to existing WiFi (STA mode)
 
-### Structure & Build
-- [x] CMake-only build (no legacy Makefiles)
-- [x] Separate `components/` per domain (display, fonts)
-- [ ] Add `clang-tidy` / `cppcheck` config and run in CI
-- [ ] Add `.editorconfig` (indent style, charset, EOL)
-- [ ] Add `CMakePresets.json` for build variants (debug, release, minimal)
-- [x] Prune unused fonts (26 of 28 removed)
-- [ ] Split `ssd1306.c` into `ssd1306.c` (driver core) + `ssd1306_gfx.c` (shapes)
+### Client WiFi Setup
+- [ ] Client connects to server's AP or existing network
+- [ ] Client stores server IP/hostname in NVS
+- [ ] Client retries connection on failure
+
+## Phase 3: Server Application (16MB ESP8266)
+
+### HTTP REST API
+- [ ] Embedded HTTP server (use ESP8266's built-in or lwip + httpd)
+- [ ] `GET /api/clients` - list connected clients
+- [ ] `GET /api/clients/<id>/data` - get raw data from specific client
+- [ ] `GET /api/data` - aggregated data from all clients
+- [ ] `POST /api/clients/<id>/upload` - receive data from client
+- [ ] `GET /api/health` - server health check
+
+### Web UI Dashboard
+- [ ] Serve static HTML/CSS/JS from flash (SPIFFS/LittleFS)
+- [ ] Real-time data display using WebSocket or polling
+- [ ] Charts for temperature, humidity, eCO2, TVOC over time
+- [ ] Client status overview (online/offline, last seen)
+- [ ] AQI summary across all clients
+
+### Data Storage (Server)
+- [ ] Use LittleFS for time-series data storage
+- [ ] Implement data retention policy (e.g., keep 7 days)
+- [ ] Store per-client data in separate files
+- [ ] Implement data aggregation (min/max/avg per hour)
+
+## Phase 4: Client Application (4MB/16MB ESP8266)
+
+### Sensor Integration
+- [ ] Initialize ENS160 + AHT21 on I2C bus
+- [ ] Read sensor data at configurable interval (default: 60s)
+- [ ] Handle sensor errors gracefully (retry, skip, log)
+- [ ] Display current readings on OLED
+
+### Display Management
+- [ ] Page 1: Temperature + Humidity (from AHT21)
+- [ ] Page 2: eCO2 + TVOC + AQI (from ENS160)
+- [ ] Page 3: WiFi status + uptime + free heap
+- [ ] Button (GPIO12): cycle pages, long press for config
+- [ ] Auto display-off after 10s, button wakes
+
+### Local Data Storage
+- [ ] NVS: store WiFi credentials, server IP, config settings
+- [ ] LittleFS: store sensor readings when offline
+- [ ] Implement circular buffer for offline data (store up to N readings)
+- [ ] Data format: timestamp, temp, humidity, eCO2, TVOC, AQI
+
+### Data Sync with Server
+- [ ] HTTP POST to server with batched readings
+- [ ] Retry on failure with exponential backoff
+- [ ] Mark synced data, delete from local storage
+- [ ] Support server request for historical data
+
+## Phase 5: Quality & Testing
+
+### Build & CI
+- [ ] Add `clang-tidy` / `cppcheck` config
+- [ ] Add `.editorconfig`
+- [ ] Add `CMakePresets.json` for build variants
+- [ ] GitHub Actions CI: build both apps on push
 
 ### Testing
-- [ ] Add hardware-in-the-loop test harness (e.g., pytest + esptool + serial)
-- [ ] I2C scan at boot logs all found devices (debug builds)
-- [ ] Self-test: ENS160 PART_ID check + AHT21 calibration status on serial
+- [ ] Hardware-in-the-loop test harness
+- [ ] I2C scan at boot logs all found devices
+- [ ] Self-test: ENS160 PART_ID + AHT21 calibration check
+- [ ] Server API integration tests
 
 ### Code Quality
-- [ ] Enforce naming convention: `snake_case` for C, `PascalCase` for C++ classes
-- [ ] Add `const` correctness pass across all source files
-- [ ] Mark internal functions `static`; expose only public API in headers
-- [ ] Remove the `int err = NULL;` warning in `ssd1306.c:862` (+submit upstream)
-- [ ] Add LOGICAL error codes (enum) instead of magic `-1`, `-2` returns
-- [ ] Fix `ssd1306_draw_char` type: `int err = NULL` → `int err = 0`
-- [ ] Wrap `#include <fonts.h>` in `extern "C"` in `ssd1306.h` once and for all
+- [ ] Enforce naming conventions
+- [ ] Const correctness pass
+- [ ] Mark internal functions `static`
+- [ ] Add logical error codes (enum) instead of magic numbers
+- [ ] Add Doxygen-style comments to public APIs
 
 ### Safety & Robustness
-- [ ] Add watchdog feed in the main loop (`vTaskDelay` is fine but document it)
-- [ ] Handle I2C bus errors gracefully (retry N times, display "ERR" instead of hang)
-- [ ] ENS160 burn-in period: show countdown on display (first 48 hours)
-- [ ] Sensor read timeout — if AHT21/ENS160 don't respond, skip and show dashes
-- [ ] Flash wear leveling if logging to NVS
+- [ ] Watchdog feed in main loops
+- [ ] I2C bus error handling (retry N times)
+- [ ] ENS160 burn-in countdown display (48 hours)
+- [ ] Sensor read timeout handling
+- [ ] Flash wear leveling for NVS/LittleFS
 
-### Documentation
-- [ ] Write proper `README.md` with:
-  - [ ] Photo of working hardware
-  - [ ] Wiring diagram (ASCII or Fritzing)
-  - [ ] I2C address table
-  - [ ] Screenshot of display output
-- [ ] Add `CONTRIBUTING.md` (how to flash, debug, add new sensors)
-- [ ] Add Doxygen-style comments to all public API headers
-- [x] Replace all Russian comments with English
+## Phase 6: Features (Roadmap)
 
-### Developer Experience
-- [ ] Add `docker-compose.yml` for one-command dev environment
-- [ ] Add `Makefile` alias targets: `make flash`, `make monitor`, `make build`
-  (thin wrappers that call `idf.py`, NOT the old make system)
-- [ ] Add `.githooks/pre-push` that runs `idf.py build`
-- [ ] UART monitor script (`tools/monitor.py`) wraps the Python serial snippet
-- [ ] GitHub Actions CI: build on push, lint on PR
-
-### Performance & Size
-- [ ] Profile free heap at boot (`esp_get_free_heap_size()`) and log it
-- [ ] Measure flash usage per component (map file analysis)
-- [ ] Option to compile-out `printf` / `ESP_LOGx` in release builds
-- [ ] Use IRAM placement only for ISR-critical paths; keep everything else in flash
-
-### Features (roadmap)
-- [ ] ENS160 + AHT21 real data display
-- [ ] Button (GPIO12): toggle display on/off, hold to cycle pages
-- [ ] Auto display-off after 10 s (already planned in AGENTS.md)
-- [ ] Page 1: temp/hum + AQI/CO2 (current layout)
-- [ ] Page 2: TVOC + raw sensor values
-- [ ] Page 3: I2C bus health / uptime / free heap
-- [ ] NVS logging: store min/max temp per day
-- [ ] Deep sleep between reads (ESP8266, ~1 hour interval)
+- [ ] Deep sleep between reads (client, configurable interval)
+- [ ] OTA firmware updates
+- [ ] Multiple client support (server handles N clients)
+- [ ] Data export (CSV download from web UI)
+- [ ] Alert thresholds (e.g., eCO2 > 1000ppm)
+- [ ] Mobile app / Telegram bot integration
