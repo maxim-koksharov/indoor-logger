@@ -1,17 +1,14 @@
 #include "Display.h"
-
-extern "C" {
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-}
 
 #define SDA_PIN 4
 #define SCL_PIN 5
 
 static Display display;
 
-extern "C" void app_main(void)
+void app_main(void)
 {
     display_init(&display, SDA_PIN, SCL_PIN, SSD1306_I2C_ADDR_0);
 
