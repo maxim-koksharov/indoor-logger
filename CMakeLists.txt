@@ -1,5 +1,7 @@
-cmake_minimum_required(VERSION 3.16)
-
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-
-project(indoor_logger)
+# Monorepo: Indoor Logger
+#
+# Build each application from its own directory:
+#   cd apps/client && idf.py build
+#   cd apps/server && idf.py build
+#
+# Shared components are in components/
