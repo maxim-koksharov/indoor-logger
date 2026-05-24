@@ -46,7 +46,7 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 
 All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}` when included from C++ files.
 
-If you need to verify your changes, use command "Flash"
+If you need to verify your changes, use command "Flash". Flash device only with Flash command.
 
 ## Hardware
 
