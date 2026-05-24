@@ -2,7 +2,12 @@
 
 ## Project overview
 
-ESP8266 embedded firmware (ESP8266 RTOS SDK / ESP-IDF style) that drives an SSD1306 OLED display over I2C to log indoor environment data (eCO2, TVOC, temperature, humidity) from an ENS160+AHT21 sensor module. C++ with C interop, but add only C++ code, if it's impossible add C code.
+ESP8266 embedded firmware monorepo (ESP8266 RTOS SDK / ESP-IDF style) with:
+- **Shared components**: SSD1306 OLED display driver, ENS160+AHT21 sensor drivers, WiFi manager, fonts
+- **Server app** (16MB ESP8266): WiFi AP, HTTP REST API, web dashboard, data aggregation
+- **Client app** (4MB/16MB ESP8266): OLED display, sensor readings, local storage, WiFi data sync to server
+
+C code only. All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}` when included from C++ files.
 
 ## Development environment
 
@@ -17,7 +22,7 @@ ESP8266 embedded firmware (ESP8266 RTOS SDK / ESP-IDF style) that drives an SSD1
 
 ## Build system
 
-**CMake only.** The `Makefile` at project root is a leftover wrapper — do not use it.
+**CMake only.** Build each application from its own directory.
 
 ### Setup
 
@@ -31,22 +36,48 @@ This is already set in the Docker image via `ENV` and `/etc/bash.bashrc`.
 
 | Action | Command |
 |---|---|
-| Configure | `idf.py menuconfig` |
-| Build | `idf.py build` |
-| Flash | `idf.py -p /dev/ttyUSB0 flash` |
-| Monitor | `idf.py -p /dev/ttyUSB0 monitor` |
-| Flash + Monitor | `idf.py -p /dev/ttyUSB0 flash monitor` |
-| Erase flash | `idf.py -p /dev/ttyUSB0 erase_flash` |
+| Configure (client) | `cd apps/client && idf.py menuconfig` |
+| Configure (server) | `cd apps/server && idf.py menuconfig` |
+| Build (client) | `cd apps/client && idf.py build` |
+| Build (server) | `cd apps/server && idf.py build` |
+| Flash (client) | `cd apps/client && idf.py -p /dev/ttyUSB0 flash` |
+| Flash (server) | `cd apps/server && idf.py -p /dev/ttyUSB0 flash` |
+| Monitor | `cd apps/<app> && idf.py -p /dev/ttyUSB0 monitor` |
+| Erase flash | `cd apps/<app> && idf.py -p /dev/ttyUSB0 erase_flash` |
 
 The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 
+## Project structure
+
+```
+/esp/project/
+├── CMakeLists.txt              # Root placeholder
+├── components/                 # Shared libraries
+│   ├── display/                # SSD1306 OLED driver + Display wrapper
+│   ├── sensors/                # ENS160 + AHT21 sensor drivers
+│   ├── fonts/                  # Font library
+│   └── wifi/                   # WiFi connection helper (STA/AP)
+├── apps/
+│   ├── server/                 # Server application (16MB ESP8266)
+│   │   ├── CMakeLists.txt
+│   │   ├── main/
+│   │   └── sdkconfig
+│   └── client/                 # Client application (4MB/16MB ESP8266)
+│       ├── CMakeLists.txt
+│       ├── main/
+│       └── sdkconfig
+└── TODO.md
+```
+
 ## Entry point
 
-`app_main()` in `main/main.cpp` — **not** `user_init` (README is outdated on this point).
+`app_main()` in `apps/<app>/main/main.c` — **not** `user_init`.
 
-All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}` when included from C++ files.
+## Agent rules for the codebase and building
 
 If you need to verify your changes, use command "Flash". Flash device only with Flash command.
+
+Add comments to code in English only.
 
 ## Hardware
 
