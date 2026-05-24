@@ -15,9 +15,9 @@ void app_main(void)
     const font_info_t *font = font_builtin_fonts[FONT_FACE_GLCD5x7];
 
     display_clear_fb(&display);
-    display_draw_string_scaled(&display, font, 0, 0, "25.5C 55%", 2);
+    display_draw_string_scaled(&display, font, 0, 0, "22.5C 55%", 2);
     display_draw_hline(&display, 0, 15, 128, OLED_COLOR_WHITE);
-    display_draw_string_scaled(&display, font, 0, 17, "AQI 2 888pm", 2);
+    display_draw_string_scaled(&display, font, 0, 17, "AQI 2 9990ppm", 2);
 
     display_present(&display);
     display_on(&display);
