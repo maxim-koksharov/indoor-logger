@@ -55,7 +55,7 @@ If you need to verify your changes, use command "Flash". Flash device only with 
 | Property | Value |
 |---|---|
 | MCU | ESP8266EX (Xtensa LX106, single core, silicon revision 1) |
-| Flash | 2 MB external |
+| Flash | 4 MB external (connected as 2 MB in sdkconfig, QIO mode) |
 | RAM | ~107 KB free at boot (IRAM + DRAM) |
 | Clock | 80 MHz / 160 MHz (configured to 160 MHz) |
 | Crystal | 26 MHz |
@@ -89,14 +89,169 @@ Both sensors share the same I2C bus — each has a unique address, so they coexi
 | Property | Value |
 |---|---|
 | Controller | SSD1306 |
-| Resolution | 128 × 64 pixels |
+| Resolution | **128 × 32 pixels** (physically 32 tall, NOT 64) |
 | Interface | I2C |
-| I2C address | `0x3C` (default) or `0x3D` (if A0 pin pulled high) |
+| I2C address | `0x3C` (confirmed by I2C scan) |
 | Supply voltage | 3.3 V – 5 V (module has onboard regulator) |
 | Color | White (monochrome) |
 | Datasheet | <https://cdn-shop.adafruit.com/datasheets/SSD1306.pdf> |
 
-Note: The current `ssd1306.h` defines `SSD1306_SCREEN` for 128×64. The 128×32 display uses the same controller but with `height = 32`. Update `oled.height` accordingly in code.
+**Critical:** The display is physically **128x32**, not 128x64. Pixels with y >= 32 are invisible. Always set `oled.height = 32`. Framebuffer size is `128 * 32 / 8 = 512` bytes.
+
+#### Working SSD1306 initialization code
+
+```cpp
+#include "ssd1306.h"
+
+extern "C" {
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "esp_err.h"
+#include "driver/i2c.h"
+}
+
+#define SDA_PIN 4
+#define SCL_PIN 5
+#define I2C_BUS I2C_NUM_0
+
+static ssd1306_t oled;
+static uint8_t fb[128 * 32 / 8];  // 512 bytes for 128x32
+
+// In app_main():
+i2c_config_t conf = {};
+conf.mode = I2C_MODE_MASTER;
+conf.sda_io_num = (gpio_num_t)SDA_PIN;   // GPIO4 = D2
+conf.scl_io_num = (gpio_num_t)SCL_PIN;   // GPIO5 = D1
+conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+conf.clk_stretch_tick = 300;
+ESP_ERROR_CHECK(i2c_driver_install(I2C_BUS, conf.mode));
+ESP_ERROR_CHECK(i2c_param_config(I2C_BUS, &conf));
+
+oled.i2c_port = I2C_BUS;
+oled.i2c_addr = SSD1306_I2C_ADDR_0;   // 0x3C
+oled.screen = SSD1306_SCREEN;
+oled.width = 128;
+oled.height = 32;                       // MUST be 32, not 64
+
+ssd1306_init(&oled);                    // Returns 0 on success, -5 (-EIO) if I2C fails
+ssd1306_set_whole_display_lighting(&oled, false);
+memset(fb, 0x00, sizeof(fb));
+
+// ... draw into fb using ssd1306_draw_pixel, ssd1306_draw_string, etc. ...
+
+ssd1306_load_frame_buffer(&oled, fb);   // Send fb to display
+ssd1306_display_on(&oled, true);        // Turn display on
+```
+
+#### SSD1306 driver API (ssd1306.h)
+
+Key functions that work:
+
+| Function | Purpose |
+|---|---|
+| `ssd1306_init(&oled)` | Initialize display. Returns 0 on success, -5 (-EIO) on I2C failure |
+| `ssd1306_display_on(&oled, bool on)` | Turn display on/off |
+| `ssd1306_set_whole_display_lighting(&oled, bool light)` | All pixels on (true) or normal (false) |
+| `ssd1306_set_contrast(&oled, uint8_t contrast)` | Set contrast 0–255 (default 0x9f) |
+| `ssd1306_set_inversion(&oled, bool on)` | Invert display |
+| `ssd1306_load_frame_buffer(&oled, fb)` | Send 512-byte framebuffer to display RAM |
+| `ssd1306_clear_screen(&oled)` | Clear display RAM |
+| `ssd1306_draw_pixel(&oled, fb, x, y, color)` | Set pixel. x: 0–127, y: 0–31 |
+| `ssd1306_draw_hline(&oled, fb, x, y, w, color)` | Horizontal line |
+| `ssd1306_draw_vline(&oled, fb, x, y, h, color)` | Vertical line |
+| `ssd1306_draw_rectangle(&oled, fb, x, y, w, h, color)` | Rectangle outline |
+| `ssd1306_fill_rectangle(&oled, fb, x, y, w, h, color)` | Filled rectangle |
+| `ssd1306_draw_char(&oled, fb, font, x, y, c, fg, bg)` | Draw single character |
+| `ssd1306_draw_string(&oled, fb, font, x, y, str, fg, bg)` | Draw string |
+
+Colors: `OLED_COLOR_WHITE` (1), `OLED_COLOR_BLACK` (0), `OLED_COLOR_INVERT` (2), `OLED_COLOR_TRANSPARENT` (-1)
+
+#### Scaled font rendering (2x for readability on 128x32)
+
+GLCD 5x7 at 1x is too small. Use 2x scaling:
+
+```cpp
+static void draw_char_scaled(const font_info_t *font, int x0, int y0, char c, int scale) {
+    const font_char_desc_t *d = font_get_char_desc(font, c);
+    if (!d) return;
+    const uint8_t *bitmap = font->bitmap + d->offset;
+    int bytes_per_row = (d->width + 7) / 8;
+    for (int y = 0; y < font->height; y++) {
+        for (int x = 0; x < d->width; x++) {
+            uint8_t byte_idx = bytes_per_row * y + x / 8;
+            uint8_t bit_idx = 7 - (x % 8);
+            if (bitmap[byte_idx] & (1 << bit_idx)) {
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        ssd1306_draw_pixel(&oled, fb, x0 + x*scale + sx, y0 + y*scale + sy, OLED_COLOR_WHITE);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void draw_string_scaled(const font_info_t *font, int x0, int y0, const char *str, int scale) {
+    int x = x0;
+    while (*str) {
+        draw_char_scaled(font, x, y0, *str, scale);
+        const font_char_desc_t *d = font_get_char_desc(font, *str);
+        x += (d ? d->width * scale : scale);
+        str++;
+        if (*str) x += font->c * scale;
+    }
+}
+
+// Usage: GLCD 5x7 at 2x → each char is ~12×14 px, ~2 lines fit on 128×32
+const font_info_t *font = font_builtin_fonts[FONT_FACE_GLCD5x7];
+draw_string_scaled(font, 0, 0, "LINE1", 2);   // y=0..13
+draw_string_scaled(font, 0, 16, "LINE2", 2);   // y=16..29
+```
+
+#### Available fonts
+
+| Enum | Name | Size | Char range | Notes |
+|---|---|---|---|---|
+| `FONT_FACE_GLCD5x7` | GLCD 5×7 | 5w×7h | 0–255 | Default, works; use with 2x scale |
+| `FONT_FACE_COMPACT_6X8` | Compact 6×8 | 6w×8h | 0x20–0xFF | Latin + Cyrillic CP1251 |
+
+#### I2C scanning (for debugging)
+
+```cpp
+for (int addr = 1; addr < 127; addr++) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(I2C_BUS, cmd, 100 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    if (ret == ESP_OK) printf("I2C device found at 0x%02X\n", addr);
+}
+```
+
+#### Serial debug output
+
+Use `printf()` in `app_main()` — output appears on UART0 at 74880 baud. Read from Docker:
+
+```python
+python3 -c "
+import serial, time
+ser = serial.Serial('/dev/ttyUSB0', 74880, timeout=1)
+ser.dtr = False; ser.rts = True; time.sleep(0.1); ser.rts = False; time.sleep(2)
+buf = b''; deadline = time.time() + 5
+while time.time() < deadline:
+    data = ser.read(4096)
+    if data: buf += data
+    elif len(buf) > 0: break
+ser.close(); print(buf.decode('utf-8', errors='replace'))
+"
+```
+
+**Note:** `idf.py monitor` does not work inside Docker (termios error). Use the Python script above instead.
 
 ## Wiring / I2C bus layout
 
@@ -172,7 +327,7 @@ No address conflicts exist. All three devices can coexist on the same bus.
 - ESP-IDF version: v3.4-110-gd412ac60
 - Serial port: `/dev/ttyUSB0`
 - Flash mode: QIO, 40 MHz
-- Flash size: 2 MB
+- Flash size: 4 MB physical (configured as 2 MB in sdkconfig — works fine)
 - CPU frequency: 160 MHz
 - Monitor baud: 74880
 
