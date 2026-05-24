@@ -53,8 +53,6 @@ static void draw_string_scaled(const font_info_t *font, int x0, int y0, const ch
 
 extern "C" void app_main(void)
 {
-    printf("=== OLED TEST START ===\n");
-
     i2c_config_t conf = {};
     conf.mode = I2C_MODE_MASTER;
     conf.sda_io_num = (gpio_num_t)SDA_PIN;
@@ -62,12 +60,8 @@ extern "C" void app_main(void)
     conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
     conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
     conf.clk_stretch_tick = 300;
-
-    printf("I2C init...\n");
-    esp_err_t err = i2c_driver_install(I2C_BUS, conf.mode);
-    printf("i2c_driver_install: %d\n", err);
-    err = i2c_param_config(I2C_BUS, &conf);
-    printf("i2c_param_config: %d\n", err);
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_BUS, conf.mode));
+    ESP_ERROR_CHECK(i2c_param_config(I2C_BUS, &conf));
 
     oled.i2c_port = I2C_BUS;
     oled.i2c_addr = SSD1306_I2C_ADDR_0;
@@ -75,46 +69,17 @@ extern "C" void app_main(void)
     oled.width = 128;
     oled.height = 32;
 
-    printf("Scanning I2C bus...\n");
-    for (int addr = 1; addr < 127; addr++) {
-        i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-        i2c_master_start(cmd);
-        i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
-        i2c_master_stop(cmd);
-        esp_err_t ret = i2c_master_cmd_begin(I2C_BUS, cmd, 100 / portTICK_PERIOD_MS);
-        i2c_cmd_link_delete(cmd);
-        if (ret == ESP_OK) {
-            printf("I2C device found at 0x%02X\n", addr);
-        }
-    }
-    printf("I2C scan done\n");
-
-    printf("SSD1306 init...\n");
-    err = ssd1306_init(&oled);
-    printf("ssd1306_init: %d\n", err);
-
+    ssd1306_init(&oled);
     ssd1306_set_whole_display_lighting(&oled, false);
-
     memset(fb, 0x00, sizeof(fb));
 
-    for (int i = 0; i < 32; i++) {
-        ssd1306_draw_pixel(&oled, fb, i, i, OLED_COLOR_WHITE);
-        ssd1306_draw_pixel(&oled, fb, 127 - i, i, OLED_COLOR_WHITE);
-    }
-
     const font_info_t *font = font_builtin_fonts[FONT_FACE_GLCD5x7];
-    printf("font: height=%d, c=%d, char_start=%d, char_end=%d\n",
-           font->height, font->c, font->char_start, font->char_end);
-    draw_string_scaled(font, 40, 4, "HELLO", 2);
+    draw_string_scaled(font, 0, 0, "25.5C 55%", 2);
+    ssd1306_draw_hline(&oled, fb, 0, 15, 128, OLED_COLOR_WHITE);
+    draw_string_scaled(font, 0, 17, "AQI 2 888pm", 2);
 
-    printf("Loading framebuffer...\n");
-    err = ssd1306_load_frame_buffer(&oled, fb);
-    printf("load_frame_buffer: %d\n", err);
-
-    printf("Display ON\n");
+    ssd1306_load_frame_buffer(&oled, fb);
     ssd1306_display_on(&oled, true);
-
-    printf("=== OLED TEST DONE ===\n");
 
     while (1) {
         vTaskDelay(5000 / portTICK_PERIOD_MS);
