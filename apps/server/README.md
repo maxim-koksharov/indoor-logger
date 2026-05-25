@@ -20,6 +20,21 @@ WiFi access point, HTTP REST API, sensor data aggregation, and embedded web dash
 | ota_1 | 0x110000 | 1 MB |
 | spiffs | 0x310000 | ~13 MB |
 
+## Build & Flash
+
+```bash
+cd apps/server
+
+# Configure (опционально)
+idf.py menuconfig
+
+# Собрать
+idf.py build
+
+# Прошить
+idf.py -p /dev/ttyUSB1 flash
+```
+
 ## Feature Summary
 
 | Feature | Details |
@@ -31,25 +46,25 @@ WiFi access point, HTTP REST API, sensor data aggregation, and embedded web dash
 | Client Registry | RAM array (max 16 clients) with NVS persistence |
 | Web UI | Zero-SPIFFS, embedded HTML/CSS/JS in `.rodata`, Canvas graphs, dark theme |
 
-## STA Credentials
+## STA Credentials (подключение к домашней WiFi)
 
-Set via NVS to enable the server to connect to your home WiFi:
+Сервер может работать в режиме AP+STA (одновременно раздавать WiFi и подключаться к домашней сети для NTP).
+
+Креденшиалы хранятся в NVS (`wifi:sta_ssid`, `wifi:sta_pass`). Если их нет — сервер работает в AP-only режиме.
+
+**Запись через прошивку или provisioning:**
 
 ```c
-nvs_set_str("wifi", "sta_ssid", "YourWiFi");
-nvs_set_str("wifi", "sta_pass", "YourPassword");
+nvs_handle_t nvs;
+nvs_open("wifi", NVS_READWRITE, &nvs);
+nvs_set_str(nvs, "sta_ssid", "MyHomeWiFi");
+nvs_set_str(nvs, "sta_pass", "MyPassword");
+nvs_commit(nvs);
+nvs_close(nvs);
 ```
 
-The server will try STA first (30s timeout). On success: AP+STA mode with NTP sync.
-On failure: AP-only mode.
-
-## Build
-
-```bash
-cd apps/server
-idf.py build
-idf.py -p /dev/ttyUSB1 flash
-```
+При старте сервер пытается подключиться к STA (30s timeout). Успех → AP+STA + NTP.
+Неудача → AP-only.
 
 ## API Endpoints
 
@@ -73,6 +88,31 @@ idf.py -p /dev/ttyUSB1 flash
 ```
 
 Fields: `t`=temperature, `h`=humidity, `c`=eCO₂, `v`=TVOC, `a`=AQI.
+
+## Timestamps
+
+Если NTP недоступен (AP-only режим), `time(NULL)` возвращает 0.
+Сервер использует `server_get_timestamp()`:
+- если `time(NULL) > 0` — возвращает Unix timestamp
+- иначе — возвращает uptime с момента запуска сервера
+
+## Self-Test at Startup
+
+Сервер логирует self-test summary после инициализации:
+
+```
+=== SELF-TEST ===
+  SPIFFS: OK (total=13631488 used=4096)
+  NVS: OK
+  Registry: 0 clients loaded, 16 slots free
+  HTTP: OK
+  SNTP: not available (AP-only)
+  STA: not configured (AP-only)
+  Time source: uptime counter
+  AP IP: 192.168.4.1
+  Heap: 102 KB free
+=== END SELF-TEST ===
+```
 
 ## Components Used
 

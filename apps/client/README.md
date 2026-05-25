@@ -21,6 +21,27 @@ OLED display, sensor readings, local data storage, and WiFi sync to server.
 | factory | 0x10000 | 1 MB |
 | spiffs | 0x110000 | ~3 MB |
 
+## Build & Flash
+
+```bash
+cd apps/client
+
+# Configure (опционально — меняет client_id, таймаут дисплея)
+idf.py menuconfig
+  → Client Configuration
+    → Client device identifier  (CONFIG_CLIENT_ID, default: test_client)
+    → Display auto-off timeout  (CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC, default: 10)
+
+# Собрать
+idf.py build
+
+# Прошить
+idf.py -p /dev/ttyUSB0 flash
+```
+
+**Важно**: `CONFIG_CLIENT_ID` — уникальный идентификатор клиента (`living_room`, `kitchen`).
+Если не менять — будет `test_client`.
+
 ## Feature Summary
 
 | Feature | Details |
@@ -30,6 +51,23 @@ OLED display, sensor readings, local data storage, and WiFi sync to server.
 | Storage | Local ring buffer in SPIFFS (5000 records max) |
 | WiFi Sync | Connects to server AP, uploads JSON every 30s |
 | Architecture | FreeRTOS task (`client_task`, 4KB stack) for main loop |
+
+## Client ID
+
+Настраивается через `menuconfig` → `Client Configuration → Client device identifier`.
+ID передаётся в query-параметре `/api/upload?id=<id>` при каждом upload.
+На сервере данные хранятся в файле `/spiffs/<id>.dat`.
+
+## ENS160 Configuration
+
+ENS160 requires ~3 minutes for first valid reading. To compile without ENS160:
+
+```c
+#define ENS160_ENABLE 0
+#include "ens160.h"
+```
+
+When disabled, only AHT21 temperature/humidity is reported. Display shows "ENS warming..." and eCO₂/TVOC/AQI values are zero.
 
 ## Display Pages
 
@@ -46,32 +84,6 @@ If ENS160 is warming up or disabled:
 ENS warming...        ← placeholder
 ```
 
-## ENS160 Configuration
-
-ENS160 requires ~3 minutes for first valid reading. To compile without ENS160:
-
-```c
-#define ENS160_ENABLE 0
-#include "ens160.h"
-```
-
-When disabled, only AHT21 temperature/humidity is reported. Display shows "ENS warming..." and eCO₂/TVOC/AQI values are zero.
-
-## Build
-
-```bash
-cd apps/client
-idf.py build
-idf.py -p /dev/ttyUSB0 flash
-```
-
-## Client ID
-
-Default: `test_client`. Change in `main.c`:
-```c
-wifi_sync_init("your_custom_id");
-```
-
 ## Data Flow
 
 ```
@@ -83,7 +95,7 @@ Every 5 seconds:
 Every 30 seconds:
   Connect to AirMon-Server
   Read 5 unsynced records from SPIFFS
-  POST JSON to http://192.168.4.1/api/upload?id=<id>
+  POST JSON to http://192.168.4.1/api/upload?id=<client_id>
   Mark records synced on 200 OK
 ```
 
@@ -95,9 +107,26 @@ Every 30 seconds:
 - `components/wifi` — WiFi manager (STA mode only)
 - ESP-IDF: `nvs_flash`, `spiffs`, `esp_http_client`, `driver/i2c`
 
+## Self-Test at Startup
+
+Клиент логирует self-test summary после инициализации всех компонентов:
+
+```
+=== SELF-TEST ===
+  NVS: OK
+  I2C: init OK (SDA=GPIO4 SCL=GPIO5)
+  Display: initialized
+  ENS160: detected          (или "warming" / "disabled")
+  AHT21: detected           (или "failed")
+  SPIFFS: OK (total=1048576 used=16384)
+  Storage: 125 records saved
+  Client ID: living_room
+  Heap at init: 64 KB
+=== END SELF-TEST ===
+```
+
 ## Known Limitations
 
-- Client ID is hardcoded (needs Kconfig/NVS integration)
-- `time(NULL)` returns 0 (no RTC/NTP); uptime_sec used instead
+- `time(NULL)` returns 0 (no RTC/NTP); uptime_sec used as timestamp
 - Deep sleep not yet implemented (currently always-on for debugging)
 - `%f` does not work in ESP8266 printf; all float display uses integer math
