@@ -52,3 +52,4 @@ sdkconfig*
 #environment
 .env/
 .env*
+.opencode*
