@@ -16,57 +16,57 @@
 ## Phase 1: Server — Partition Table & Data Store
 
 ### S1: Partition Table (Server 16MB, no OTA)
-- [ ] Создать `apps/server/partitions_server.csv`:
+- [x] Создать `apps/server/partitions_server.csv`:
   - nvs (0x4000), phy_init (0x1000)
   - ota_0 (1MB), ota_1 (1MB) — оставить на всякий случай, но OTA не используется
   - spiffs (~14MB, offset 0x210000) — под данные клиентов
-- [ ] Обновить `apps/server/sdkconfig`:
+- [x] Обновить `apps/server/sdkconfig`:
   - `CONFIG_PARTITION_TABLE_CUSTOM=y`
   - `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_server.csv"`
-- [ ] Проверка: `cd apps/server && idf.py build` проходит без ошибок.
+- [x] Проверка: `cd apps/server && idf.py build` проходит без ошибок.
 
 ### S2: Data Store Module (`apps/server/main/data_store.c/h`)
-- [ ] Определить `data_record_t` (packed, 14 байт):
+- [x] Определить `data_record_t` (packed, 14 байт):
   - `uint32_t timestamp`, `int16_t temp*100`, `uint16_t hum*100`, `uint16_t eco2`, `uint16_t tvoc`, `uint8_t aqi`, `uint8_t _pad`
-- [ ] Определить `client_file_header_t` (magic, version, client_id[32], max_records, write_idx, count)
-- [ ] Реализовать `data_store_init()` — mount SPIFFS, форматировать при первом старте.
-- [ ] Реализовать `data_store_append(client_id, rec)` — циклическая запись в `/spiffs/<id>.dat`.
-- [ ] Реализовать `data_store_read_range(client_id, offset, limit, out, capacity)` — чтение записей.
-- [ ] Реализовать `data_store_get_count(client_id)`.
-- [ ] Реализовать `data_store_delete_client(client_id)`.
-- [ ] Тест в `main.c`: append 3 записи, read, print — проверить через логи.
+- [x] Определить `client_file_header_t` (magic, version, client_id[32], max_records, write_idx, count)
+- [x] Реализовать `data_store_init()` — mount SPIFFS, форматировать при первом старте.
+- [x] Реализовать `data_store_append(client_id, rec)` — циклическая запись в `/spiffs/<id>.dat`.
+- [x] Реализовать `data_store_read_range(client_id, offset, limit, out, capacity)` — чтение записей.
+- [x] Реализовать `data_store_get_count(client_id)`.
+- [x] Реализовать `data_store_delete_client(client_id)`.
+- [x] Тест в `main.c`: append 3 записи, read, print — проверить через логи.
 
 ### S3: Client Registry (`apps/server/main/client_registry.c/h`)
-- [ ] `client_info_t` (id[32], name[32], last_seen, online, ip_str[16]).
-- [ ] Массив в RAM (max 16 клиентов).
-- [ ] `client_registry_init()`, `update()`, `get()`, `get_all()`.
-- [ ] `client_registry_check_stale(timeout_sec=360)` — пометить offline.
-- [ ] Сохранение/загрузка в NVS (`client_registry_save/load`).
-- [ ] Тест: рестарт сервера → реестр восстанавливается из NVS.
+- [x] `client_info_t` (id[32], name[32], last_seen, online, ip_str[16]).
+- [x] Массив в RAM (max 16 клиентов).
+- [x] `client_registry_init()`, `update()`, `get()`, `get_all()`.
+- [x] `client_registry_check_stale(timeout_sec=360)` — пометить offline.
+- [x] Сохранение/загрузка в NVS (`client_registry_save/load`).
+- [x] Тест: рестарт сервера → реестр восстанавливается из NVS.
 
 ---
 
 ## Phase 2: Server — HTTP REST API
 
 ### S4: HTTP Server Core (`apps/server/main/http_server.c/h`)
-- [ ] `http_server_init()`, `http_server_start()`.
-- [ ] Endpoint `GET /api/health` → JSON: status, uptime, free_heap, clients_online.
-- [ ] Endpoint `GET /api/clients` → JSON-массив: id, name, online, last_seen, latest values.
-- [ ] Endpoint `GET /api/clients/<id>` → JSON: info + последние N записей (default 24).
-- [ ] Endpoint `POST /api/clients/<id>/upload` → JSON array:
+- [x] `http_server_init()`, `http_server_start()`.
+- [x] Endpoint `GET /api/health` → JSON: status, uptime, free_heap, clients_online.
+- [x] Endpoint `GET /api/clients` → JSON-массив: id, name, online, last_seen, latest values.
+- [x] Endpoint `GET /api/clients/<id>` → JSON: info + последние N записей (default 24).
+- [x] Endpoint `POST /api/clients/<id>/upload` → JSON array:
   - Парсинг `cJSON`, для каждого объекта: `uptime`, `temp`, `hum`, `eco2`, `tvoc`, `aqi`.
   - Конвертация в `data_record_t` (timestamp = time(NULL), float → fixed-point).
   - `data_store_append()` + `client_registry_update()`.
-- [ ] Endpoint `GET /api/clients/<id>/data?limit=&offset=` → JSON-массив записей для графиков.
+- [x] Endpoint `GET /api/clients/<id>/data?limit=&offset=` → JSON-массив записей для графиков.
 - [ ] Проверка через `curl`: все endpoints отвечают корректно.
 
 ### S5: Embedded Web UI (`apps/server/main/web_ui.h`)
-- [ ] `index_html[]` — одностраничный UI, inline CSS + JS.
-- [ ] Таблица клиентов: ID, имя, статус (online/offline), время, текущие значения.
-- [ ] Детальная карточка по клику: последние значения крупно + `<canvas>` график (24 точки).
-- [ ] Автообновление: `fetch('/api/clients')` каждые 5 сек.
-- [ ] Тёмная тема, моноширинные цифры, AQI-индикаторы (цвета).
-- [ ] Подключить к `http_server.c` (URI `/` → `index_html`).
+- [x] `index_html[]` — одностраничный UI, inline CSS + JS.
+- [x] Таблица клиентов: ID, имя, статус (online/offline), время, текущие значения.
+- [x] Детальная карточка по клику: последние значения крупно + `<canvas>` график (24 точки).
+- [x] Автообновление: `fetch('/api/clients')` каждые 5 сек.
+- [x] Тёмная тема, моноширинные цифры, AQI-индикаторы (цвета).
+- [x] Подключить к `http_server.c` (URI `/` → `index_html`).
 - [ ] Проверка: браузер открывает страницу, видит данные.
 
 ---
@@ -74,22 +74,22 @@
 ## Phase 3: Server — WiFi, NTP & Integration
 
 ### S6: WiFi Manager Доработка (`components/wifi/`)
-- [ ] Добавить `wifi_manager_init_ap_with_sta_fallback(ap_ssid, ap_pass, sta_ssid, sta_pass)`.
-- [ ] Если STA креденшиалы заданы — `WIFI_MODE_APSTA`, попытка подключения.
-- [ ] Если STA не удался за 30 сек — оставить только AP.
-- [ ] `wifi_manager_get_ap_ip()` — получить IP AP-интерфейса.
+- [x] Добавить `wifi_manager_init_ap_with_sta_fallback(ap_ssid, ap_pass, sta_ssid, sta_pass)`.
+- [x] Если STA креденшиалы заданы — `WIFI_MODE_APSTA`, попытка подключения.
+- [x] Если STA не удался за 30 сек — оставить только AP.
+- [x] `wifi_manager_get_ap_ip()` — получить IP AP-интерфейса.
 
 ### S7: NTP & Main Loop
-- [ ] Если STA подключился — запустить SNTP (`esp_netif_sntp_init` или `sntp_setoperatingmode`).
-- [ ] Подождать синхронизации времени.
-- [ ] `main.c` flow: NVS → data_store → registry_load → WiFi → SNTP → http_server.
-- [ ] Основной цикл (vTaskDelay 30000):
+- [x] Если STA подключился — запустить SNTP (`esp_netif_sntp_init` или `sntp_setoperatingmode`).
+- [x] Подождать синхронизации времени.
+- [x] `main.c` flow: NVS → data_store → registry_load → WiFi → SNTP → http_server.
+- [x] Основной цикл (vTaskDelay 30000):
   - `client_registry_check_stale(360)`
   - `esp_task_wdt_feed()`
   - ESP_LOGI stats (uptime, heap, clients online)
 
 ### S8: Server Build & Test
-- [ ] Полная сборка: `cd apps/server && idf.py build`
+- [x] Полная сборка: `cd apps/server && idf.py build`
 - [ ] Эмуляция client через `curl`: отправка JSON upload, проверка отображения в UI.
 - [ ] Рестарт сервера: данные на месте, реестр восстановлен.
 
