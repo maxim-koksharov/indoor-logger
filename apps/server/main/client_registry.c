@@ -9,6 +9,8 @@ static const char *TAG = "client_registry";
 static client_info_t clients[CLIENT_REGISTRY_MAX_CLIENTS];
 static int client_count = 0;
 
+extern uint32_t server_get_timestamp(void);
+
 int client_registry_init(void) {
     memset(clients, 0, sizeof(clients));
     client_count = 0;
@@ -35,7 +37,7 @@ int client_registry_update(const char *id, const char *name, const char *ip) {
         strncpy(c->ip_str, ip, CLIENT_REGISTRY_IP_LEN - 1);
     }
     
-    c->last_seen = (uint32_t)time(NULL);
+    c->last_seen = server_get_timestamp();
     c->online = true;
     
     return 0;
@@ -57,7 +59,7 @@ int client_registry_get_all(client_info_t *out, int capacity) {
 }
 
 void client_registry_check_stale(uint32_t timeout_sec) {
-    uint32_t now = (uint32_t)time(NULL);
+    uint32_t now = server_get_timestamp();
     
     for (int i = 0; i < client_count; i++) {
         if (clients[i].online && (now - clients[i].last_seen) > timeout_sec) {

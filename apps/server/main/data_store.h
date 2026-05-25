@@ -4,35 +4,73 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define DATA_STORE_MAGIC 0x44415441
 #define DATA_STORE_VERSION 1
 #define DATA_STORE_MAX_CLIENTS 16
 #define DATA_STORE_MAX_RECORDS_PER_CLIENT 10000
 
+/** @brief A single sensor data record (packed to 14 bytes). */
 typedef struct __attribute__((packed)) {
-    uint32_t timestamp;
-    int16_t temp_x100;
-    uint16_t hum_x100;
-    uint16_t eco2;
-    uint16_t tvoc;
-    uint8_t aqi;
-    uint8_t _pad;
+    uint32_t timestamp;  /**< Unix timestamp or uptime seconds */
+    int16_t  temp_x100;  /**< Temperature in Celsius * 100 (signed) */
+    uint16_t hum_x100;   /**< Humidity in % RH * 100 (unsigned) */
+    uint16_t eco2;       /**< Equivalent CO2 in ppm */
+    uint16_t tvoc;       /**< Total VOC in ppb */
+    uint8_t  aqi;        /**< Air Quality Index 1-5 */
+    uint8_t  _pad;       /**< Padding to align to 14 bytes */
 } data_record_t;
 
+/** @brief Per-client file header at the start of each /spiffs/<id>.dat file. */
 typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint8_t version;
-    char client_id[32];
-    uint32_t max_records;
-    uint32_t write_idx;
-    uint32_t count;
+    uint32_t magic;               /**< DATA_STORE_MAGIC identifier */
+    uint8_t  version;             /**< DATA_STORE_VERSION */
+    char     client_id[32];       /**< Client identifier string */
+    uint32_t max_records;         /**< Ring buffer capacity */
+    uint32_t write_idx;           /**< Current write position in ring buffer */
+    uint32_t count;               /**< Total records written (capped at max_records) */
 } client_file_header_t;
 
+/** @brief Mount SPIFFS and prepare the data store.
+ *  @return 0 on success, -1 on failure (SPIFFS mount failed).
+ */
 int data_store_init(void);
+
+/** @brief Append a record to a client's ring buffer file.
+ *  @param client_id  Client identifier (used as filename: /spiffs/<id>.dat).
+ *  @param rec        Pointer to the record to append.
+ *  @return 0 on success, -1 on failure (I/O error, SPIFFS full).
+ */
 int data_store_append(const char *client_id, const data_record_t *rec);
+
+/** @brief Read a range of records from a client's file.
+ *  @param client_id Client identifier.
+ *  @param offset    Record offset from the oldest record.
+ *  @param limit     Maximum number of records to read.
+ *  @param out       Output buffer (must be at least @p capacity records).
+ *  @param capacity  Size of the output buffer in records.
+ *  @return Number of records actually read (0 if none or file missing).
+ */
 int data_store_read_range(const char *client_id, uint32_t offset, uint32_t limit,
                           data_record_t *out, uint32_t capacity);
+
+/** @brief Get the total number of stored records for a client.
+ *  @param client_id Client identifier.
+ *  @return Record count, or 0 if the client has no file.
+ */
 uint32_t data_store_get_count(const char *client_id);
+
+/** @brief Delete a client's data file from SPIFFS.
+ *  @param client_id Client identifier.
+ *  @return 0 on success, -1 if the file could not be deleted.
+ */
 int data_store_delete_client(const char *client_id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

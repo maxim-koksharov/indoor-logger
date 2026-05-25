@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "lwip/apps/sntp.h"
+#include "esp_spiffs.h"
 #include "wifi_manager.h"
 #include "data_store.h"
 #include "client_registry.h"
@@ -21,6 +22,14 @@ static const char *TAG = "server";
 #define STA_TIMEOUT_SEC 30
 #define STALE_TIMEOUT_SEC 360
 #define MAIN_LOOP_INTERVAL_MS 30000
+
+static uint32_t server_start_tick = 0;
+
+uint32_t server_get_timestamp(void) {
+    time_t now = time(NULL);
+    if (now > 0) return (uint32_t)now;
+    return (xTaskGetTickCount() - server_start_tick) * portTICK_PERIOD_MS / 1000;
+}
 
 static int read_sta_creds(char *ssid, size_t ssid_sz, char *pass, size_t pass_sz) {
     nvs_handle_t nvs;
@@ -57,7 +66,7 @@ static const char *get_sta_pass(void) {
     return pass;
 }
 
-static void write_sta_creds(const char *ssid, const char *pass) {
+void __attribute__((unused)) write_sta_creds(const char *ssid, const char *pass) {
     nvs_handle_t nvs;
     if (nvs_open("wifi", NVS_READWRITE, &nvs) != ESP_OK) return;
     nvs_set_str(nvs, "sta_ssid", ssid);
@@ -93,6 +102,8 @@ static void init_sntp(void) {
 
 void app_main(void) {
     ESP_LOGI(TAG, "Server starting...");
+
+    server_start_tick = xTaskGetTickCount();
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -145,6 +156,32 @@ void app_main(void) {
         return;
     }
     ESP_LOGI(TAG, "HTTP server running at http://%s", ip_str);
+
+    // Self-test summary
+    {
+        uint32_t spiffs_total = 0, spiffs_used = 0;
+        esp_err_t spiffs_ret = esp_spiffs_info(NULL, &spiffs_total, &spiffs_used);
+        bool sntp_ok = (time(NULL) > 0);
+        ESP_LOGI(TAG, "=== SELF-TEST ===");
+        ESP_LOGI(TAG, "  SPIFFS: %s (total=%u used=%u)",
+                 spiffs_ret == ESP_OK ? "OK" : "FAIL", spiffs_total, spiffs_used);
+        ESP_LOGI(TAG, "  NVS: OK");
+        ESP_LOGI(TAG, "  Registry: %d clients loaded, %d slots free",
+                 loaded, CLIENT_REGISTRY_MAX_CLIENTS - loaded);
+        ESP_LOGI(TAG, "  HTTP: OK");
+        ESP_LOGI(TAG, "  SNTP: %s", sntp_ok ? "synced" : "not available (AP-only)");
+        if (sta_ssid) {
+            ESP_LOGI(TAG, "  STA: %s (config=%s, mode=%s)",
+                     wifi_manager_is_connected() ? "connected" : "failed",
+                     sta_ssid, wifi_manager_is_connected() ? "AP+STA" : "AP-only");
+        } else {
+            ESP_LOGI(TAG, "  STA: not configured (AP-only)");
+        }
+        ESP_LOGI(TAG, "  Time source: %s", sntp_ok ? "NTP" : "uptime counter");
+        ESP_LOGI(TAG, "  AP IP: %s", ip_str);
+        ESP_LOGI(TAG, "  Heap: %d KB free", (int)(esp_get_free_heap_size() / 1024));
+        ESP_LOGI(TAG, "=== END SELF-TEST ===");
+    }
 
     ESP_LOGI(TAG, "Server ready. Main loop started.");
 
