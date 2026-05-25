@@ -114,6 +114,35 @@ Calling this a second time returns `ESP_ERR_INVALID_STATE` → `abort()`. Guard 
 
 On ESP8266, calling `vTaskDelay()` directly in `app_main()`'s `while(1)` loop causes `rst cause: 2`. Always create a separate FreeRTOS task with `xTaskCreate()` for main loop logic.
 
+### `esp_task_wdt_add(NULL)` does not exist in ESP-IDF v3.4
+
+ESP-IDF v3.4 for ESP8266 does not have `esp_task_wdt_add()`. Only `esp_task_wdt_init()` and `esp_task_wdt_reset()` / `esp_task_wdt_feed()` are available. Call `esp_task_wdt_reset()` in each loop iteration instead.
+
+### `httpd_resp_send_err()` does not exist in ESP-IDF v3.4 HTTP server
+
+The `httpd_resp_send_err()` function and `HTTPD_400_BAD_REQUEST` / `HTTPD_404_NOT_FOUND` constants are not available. Use `httpd_resp_send_404(req)`, `httpd_resp_send_500(req)`, or manually set type and send:
+```c
+httpd_resp_set_type(req, "text/plain");
+httpd_resp_send(req, "error message", 13);
+```
+
+## Server timestamp fallback
+
+When NTP is unavailable (AP-only mode), `time(NULL)` returns 0. The server uses `server_get_timestamp()` which returns `time(NULL)` if valid (> 0), otherwise returns uptime since server start. Declare `extern uint32_t server_get_timestamp(void);` in any C file that needs it.
+
+## Client Kconfig options
+
+Client app has Kconfig options in `apps/client/main/Kconfig.projbuild`:
+
+| Option | Default | Description |
+|---|---|---|
+| `CONFIG_CLIENT_ID` | `test_client` | Client identifier for uploads |
+| `CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC` | 10 | Display auto-off timeout (0 = always-on) |
+
+## Self-test at startup
+
+Both apps log a self-test summary at startup after all components are initialized. The output includes SPIFFS status, sensor detection, NVS, heap, and connection mode. This is the primary way to verify correct operation on real hardware.
+
 ## ENS160 Sensor Notes
 
 | Feature | Detail |

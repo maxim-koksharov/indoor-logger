@@ -156,24 +156,26 @@
 
 ## Phase 5: Quality & Robustness
 
-- [ ] I2C retry (3 попытки с 10 мс delay) во всех драйверах (ENS160 и AHT21).
-- [ ] Sensor read timeout: если ENS160 status не ready за X сек — skip reading (уже добавлен 3× retry).
-- [ ] Watchdog feed в каждом цикле (`esp_task_wdt_feed()`).
-- [ ] Doxygen-комментарии к публичным API (`data_store.h`, `client_registry.h`, `http_server.h`).
+- [x] I2C retry (3 попытки с 10 мс delay) во всех драйверах (ENS160 и AHT21).
+- [x] Watchdog feed в каждом цикле (`esp_task_wdt_reset()`).
+- [x] Doxygen-комментарии к публичным API (`data_store.h`, `client_registry.h`, `http_server.h`).
+- [x] Client ID: заменить hardcoded `test_client` на Kconfig (`CONFIG_CLIENT_ID` в Kconfig.projbuild).
+- [x] Timestamp на сервере: `time(NULL)` = 0 (нет NTP в AP-only режиме). Заменить на `server_get_timestamp()` — uptime с момента запуска сервера.
+- [x] Self-test / health check при старте обоих приложений (логирование статуса всех компонентов).
+- [x] Расширенная обработка ошибок во всех модулях:
+  - HTTP server: проверка cJSON_IsNumber(), Content-Length лимит (8KB), JSON parse errors, recv timeout
+  - Data store: обработка ошибок записи/чтения, проверка magic, пересоздание при повреждении
+  - Client registry: защита от переполнения, проверка границ, stale timeout
+  - WiFi sync: connection timeout (30 попыток по 1 сек), HTTP error handling
+  - Data storage (client): обработка corrupt header, автоматическое пересоздание файла
+- [x] README.md для каждой компоненты и приложения (display, sensors, wifi, fonts, server, client).
 - [ ] `.editorconfig` и `clang-format` (опционально).
 - [ ] Удалить старый `main/` каталог в корне (если ещё есть).
-- [ ] Client ID: заменить hardcoded `test_client` на Kconfig/NVS.
-- [ ] Timestamp на сервере: `time(NULL)` = 0 (нет NTP в AP-only режиме). Заменить на uptime с момента запуска сервера.
 - [ ] Web UI: проверить корректность отображения данных извне (через WiFi подключение к `AirMon-Server`).
-- [ ] README.md для каждой компоненты и приложения (display, sensors, wifi, fonts, server, client).
 - [ ] Процедура первоначальной настройки: запись STA credentials в NVS сервера (wifi:sta_ssid + sta_pass) для подключения к домашней WiFi.
 
 ---
 
 ## Phase 6: Roadmap (будущие фичи)
 
-- [ ] Alert thresholds (eCO2 > 1000 ppm, AQI > 3) — server-side логирование warning.
-- [ ] Data export CSV (`GET /api/clients/<id>/export.csv`).
-- [ ] Telegram бот / Push-уведомления при алертах.
 - [ ] Настройка имён клиентов через веб-UI.
-- [ ] Поддержка нескольких сенсоров на одном client (опционально).
