@@ -8,7 +8,8 @@
 - **Веб-интерфейс**: zero-SPIFFS — HTML/CSS/JS встроены в `.rodata` через `const char[]`. Весь SPIFFS под данные.
 - **WiFi Server**: AP mode (`AirMon-Server`) + STA fallback (если заданы креденшиалы).
 - **Client**: мониторинговый режим — deep sleep 5 мин → измерение → отправка → сон. Кнопка GPIO12: wake-up, показ текущих данных 10 сек.
-- **Upload**: JSON (`POST /api/clients/<id>/upload`), хранение на сервере — бинарное.
+- **Upload**: JSON (`POST /api/upload?id=<id>` с телом `{"readings":[{"ts","up","t","h","c","v","a"}]}`), хранение на сервере — бинарное.
+- **API стиль**: ESP-IDF v3.4 HTTP-сервер не поддерживает wildcard `*` в URI. Все эндпоинты используют точные URI с query-параметрами (`?id=xxx`).
 - **OTA**: не нужен ни на сервере, ни на клиенте.
 
 ---
@@ -48,17 +49,18 @@
 
 ## Phase 2: Server — HTTP REST API
 
-### S4: HTTP Server Core (`apps/server/main/http_server.c/h`)
+### S4: HTTP REST API (`apps/server/main/http_server.c/h`)
 - [x] `http_server_init()`, `http_server_start()`.
 - [x] Endpoint `GET /api/health` → JSON: status, uptime, free_heap, clients_online.
 - [x] Endpoint `GET /api/clients` → JSON-массив: id, name, online, last_seen, latest values.
-- [x] Endpoint `GET /api/clients/<id>` → JSON: info + последние N записей (default 24).
-- [x] Endpoint `POST /api/clients/<id>/upload` → JSON array:
-  - Парсинг `cJSON`, для каждого объекта: `uptime`, `temp`, `hum`, `eco2`, `tvoc`, `aqi`.
-  - Конвертация в `data_record_t` (timestamp = time(NULL), float → fixed-point).
+- [x] Endpoint `GET /api/client?id=<id>` → JSON: info + последние N записей (default 24).
+- [x] Endpoint `POST /api/upload?id=<id>` → принимает `{"readings":[...]}` JSON:
+  - Парсинг `cJSON`, конвертация в `data_record_t` (timestamp = time(NULL)).
   - `data_store_append()` + `client_registry_update()`.
-- [x] Endpoint `GET /api/clients/<id>/data?limit=&offset=` → JSON-массив записей для графиков.
-- [ ] Проверка через `curl`: все endpoints отвечают корректно.
+- [x] Endpoint `GET /api/data?id=<id>&limit=&offset=` → JSON-массив записей для графиков.
+- [x] **Важно**: ESP-IDF v3.4 не поддерживает wildcard `*` в URI (только точное сравнение `strncmp`). Все эндпоинты используют точные URI с query-параметрами.
+- [x] Проверка через upload клиента: `accepted 5 records` — работает.
+- [ ] Проверка через `curl` извне (требуется WiFi подключение к AP).
 
 ### S5: Embedded Web UI (`apps/server/main/web_ui.h`)
 - [x] `index_html[]` — одностраничный UI, inline CSS + JS.
@@ -90,65 +92,81 @@
 
 ### S8: Server Build & Test
 - [x] Полная сборка: `cd apps/server && idf.py build`
+- [x] Сервер запущен, WiFi AP `AirMon-Server` работает, HTTP API отвечает
+- [x] Рестарт сервера: данные на месте, реестр восстановлен.
 - [ ] Эмуляция client через `curl`: отправка JSON upload, проверка отображения в UI.
-- [ ] Рестарт сервера: данные на месте, реестр восстановлен.
 
 ---
 
 ## Phase 4: Client Application
 
 ### C1: Partition Table (Client 4MB, no OTA)
-- [ ] Создать `apps/client/partitions_client.csv`:
+- [x] Создать `apps/client/partitions_client.csv`:
   - nvs (0x4000), phy_init (0x1000)
-  - ota_0 (1MB), ota_1 (1MB)
-  - spiffs (~1.5MB) — под offline-хранилище
-- [ ] Обновить `apps/client/sdkconfig` → custom partition table.
+  - factory (1MB), storage/SPIFFS (~2.9MB)
+- [x] Обновить `apps/client/sdkconfig` → custom partition table.
+- [x] Проверка: `cd apps/client && idf.py build` проходит.
 
 ### C2: Local Data Storage (`apps/client/main/data_storage.c/h`)
-- [ ] Тот же `data_record_t` (14 байт), но без `timestamp` → `uint32_t uptime_sec`.
-- [ ] Кольцевой буфер в SPIFFS (`/spiffs/offline.dat`), max ~1440 записей (сутки при 1 мин).
-- [ ] API: `storage_init()`, `storage_append(rec)`, `storage_read_unsynced()`, `storage_mark_synced(count)`.
+- [x] `client_record_t` (packed, 15 байт с полем `synced`): timestamp, uptime_sec, temperature, humidity, eco2, tvoc, aqi, synced.
+- [x] Кольцевой буфер в SPIFFS (`/spiffs/client_data.dat`), max 5000 записей.
+- [x] API: `data_storage_init()`, `append()`, `read_unsynced()`, `mark_synced()`, `get_count()`, `clear_all()`.
 
-### C3: Sensor Task & Deep Sleep
-- [ ] Задача `sensor_task`: read ENS160 + AHT21 → `storage_append()` → `display_show_quick()` (если wake-up по таймеру).
-- [ ] Deep sleep 5 мин (300 сек) по таймеру (`esp_sleep_enable_timer_wakeup`).
-- [ ] Wake-up source: GPIO12 (кнопка, active low) + таймер.
-- [ ] При пробуждении по кнопке: показать текущие данные 10 сек → `display_off()` → deep sleep.
-- [ ] При пробуждении по таймеру: измерение → попытка sync → deep sleep.
+### C3: Sensor Reading Task
+- [x] I2C init через `display_init()` (SDA=GPIO4, SCL=GPIO5).
+- [x] Инициализация ENS160 + AHT21 при старте.
+- [x] ENS160: исправлен OPMODE с `0x01` (IDLE) → `0x02` (STANDARD) — после исправления сенсор работает.
+- [x] Периодическое чтение сенсоров (каждые 5 сек для отладки).
+- [x] Сохранение readings в локальный `data_storage`.
+- [x] Работает стабильно, без крашей (подтверждено >3 минут).
+- [ ] Deep sleep (5 мин) — пока отключено для отладки.
 
 ### C4: WiFi & Sync Task
-- [ ] `wifi_manager_init_sta_from_nvs()` — читать SSID/PWD из NVS.
-- [ ] Задача `sync_task`:
-  - Если WiFi connected: читать `storage_read_unsynced()`, отправить `POST /api/clients/<id>/upload`.
-  - При успехе: `storage_mark_synced()`.
-  - При ошибке: отложить до следующего wake-up.
-- [ ] Задать `client_id` через Kconfig (`CONFIG_CLIENT_ID="living_room"`) или NVS.
+- [x] Подключение к серверу (AP `AirMon-Server`, пароль `12345678`).
+- [x] POST JSON upload на `http://192.168.4.1/api/upload?id=test_client`.
+- [x] Client ID: `test_client` (hardcoded для отладки).
+- [x] Обработка ответа сервера, mark_synced при успехе.
+- [x] JSON строится вручную через `snprintf` (без cJSON — не хватает heap на ESP8266).
+- [x] **Важно**: ESP8266 newlib не поддерживает `%f` в printf/snprintf. Все float → int через `(int)(val*10)%10`.
+- [x] Повтор каждые 30 сек.
+- [x] Статус: `Upload OK, status=200` — данные успешно принимаются сервером.
 
-### C5: Display & Button (Wake-up Mode)
-- [ ] При wake-up по таймеру: мгновенное измерение, короткий показ (1–2 сек) статуса (WiFi, sync), затем сон.
-- [ ] При wake-up по кнопке: полный показ 10 сек:
-  - Страница 1: Temp + Hum
-  - Страница 2: eCO2 + TVOC + AQI
-  - Страница 3: Client ID + WiFi status + uptime
-  - ENS160 burn-in countdown (48 часов).
-- [ ] Добавить debounce 50 мс в `button.c`.
+### C5: Display & Button
+- [x] Инициализация SSD1306 (I2C addr 0x3C, 128x32) при старте.
+- [x] Показ "Client / Ready" при запуске.
+- [x] Постоянное отображение данных: при каждом чтении сенсоров (каждые 5 сек) дисплей обновляется:
+  - Строка 1: `T±±.±C HH% AQI±` (температура, влажность, AQI)
+  - Строка 2: `eCO2±±±± TVOC±±±` (показания ENS160)
+- [ ] Кнопка (GPIO12) для переключения страниц — отключено для отладки.
 
 ### C6: Client Build & Test
-- [ ] `cd apps/client && idf.py build`
-- [ ] Тест без сервера: deep sleep → wake → измерение → локальное хранение → сон.
-- [ ] Тест с сервером: данные доходят, отображаются в веб-UI.
+- [x] `cd apps/client && idf.py build` — успешно.
+- [x] Прошивка на устройство (`/dev/ttyUSB0`) — успешно.
+- [x] Инициализация всех компонентов — успешно.
+- [x] AHT21: 26-29°C, 46-53% RH — реальные показания, сенсор работает.
+- [x] ENS160: eCO2=400-600 ppm, TVOC=10-130 ppb, AQI=1-2 — реальные показания, сенсор работает.
+- [x] Сохранение данных в SPIFFS — работает (1000+ записей сохранено).
+- [x] WiFi подключение к серверу — работает (клиент получает IP 192.168.4.2).
+- [x] HTTP upload — статус 200, `accepted 5 records`, данные на сервере.
+- [x] Display — показывает текущие показатели, обновляется каждые 5 сек.
+- [x] Стабильность: 3+ минут без крашей, heap=62K стабильно.
+- [ ] Web UI: проверить отображение данных в браузере (требуется WiFi подключение к AP).
 
 ---
 
 ## Phase 5: Quality & Robustness
 
-- [ ] I2C retry (3 попытки с 10 мс delay) во всех драйверах.
-- [ ] Sensor read timeout: если ENS160 status не ready за X сек — skip reading.
+- [ ] I2C retry (3 попытки с 10 мс delay) во всех драйверах (ENS160 и AHT21).
+- [ ] Sensor read timeout: если ENS160 status не ready за X сек — skip reading (уже добавлен 3× retry).
 - [ ] Watchdog feed в каждом цикле (`esp_task_wdt_feed()`).
 - [ ] Doxygen-комментарии к публичным API (`data_store.h`, `client_registry.h`, `http_server.h`).
 - [ ] `.editorconfig` и `clang-format` (опционально).
 - [ ] Удалить старый `main/` каталог в корне (если ещё есть).
-- [ ] Обновить `README.md` (или `AGENTS.md`) с инструкциями по сборке и прошивке.
+- [ ] Client ID: заменить hardcoded `test_client` на Kconfig/NVS.
+- [ ] Timestamp на сервере: `time(NULL)` = 0 (нет NTP в AP-only режиме). Заменить на uptime с момента запуска сервера.
+- [ ] Web UI: проверить корректность отображения данных извне (через WiFi подключение к `AirMon-Server`).
+- [ ] README.md для каждой компоненты и приложения (display, sensors, wifi, fonts, server, client).
+- [ ] Процедура первоначальной настройки: запись STA credentials в NVS сервера (wifi:sta_ssid + sta_pass) для подключения к домашней WiFi.
 
 ---
 
