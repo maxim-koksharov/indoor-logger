@@ -7,6 +7,7 @@
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "lwip/apps/sntp.h"
 #include "wifi_manager.h"
 #include "data_store.h"
@@ -17,11 +18,54 @@ static const char *TAG = "server";
 
 #define WIFI_AP_SSID "AirMon-Server"
 #define WIFI_AP_PASS "12345678"
-#define WIFI_STA_SSID NULL
-#define WIFI_STA_PASS NULL
 #define STA_TIMEOUT_SEC 30
 #define STALE_TIMEOUT_SEC 360
 #define MAIN_LOOP_INTERVAL_MS 30000
+
+static int read_sta_creds(char *ssid, size_t ssid_sz, char *pass, size_t pass_sz) {
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open("wifi", NVS_READONLY, &nvs);
+    if (err != ESP_OK) return -1;
+
+    size_t len = ssid_sz;
+    err = nvs_get_str(nvs, "sta_ssid", ssid, &len);
+    if (err != ESP_OK) { nvs_close(nvs); return -1; }
+
+    len = pass_sz;
+    err = nvs_get_str(nvs, "sta_pass", pass, &len);
+    nvs_close(nvs);
+    return (err == ESP_OK) ? 0 : -1;
+}
+
+static const char *get_sta_ssid(void) {
+    static char ssid[32] = "";
+    static char pass[64] = "";
+    if (ssid[0] == '\0') {
+        if (read_sta_creds(ssid, sizeof(ssid), pass, sizeof(pass)) != 0) {
+            ssid[0] = '\0';
+        }
+    }
+    return ssid[0] ? ssid : NULL;
+}
+
+static const char *get_sta_pass(void) {
+    static char ssid[32] = "";
+    static char pass[64] = "";
+    if (ssid[0] == '\0') {
+        read_sta_creds(ssid, sizeof(ssid), pass, sizeof(pass));
+    }
+    return pass;
+}
+
+static void write_sta_creds(const char *ssid, const char *pass) {
+    nvs_handle_t nvs;
+    if (nvs_open("wifi", NVS_READWRITE, &nvs) != ESP_OK) return;
+    nvs_set_str(nvs, "sta_ssid", ssid);
+    nvs_set_str(nvs, "sta_pass", pass);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+    ESP_LOGI(TAG, "STA credentials saved to NVS");
+}
 
 static void init_sntp(void) {
     ESP_LOGI(TAG, "Initializing SNTP");
@@ -68,9 +112,17 @@ void app_main(void) {
     int loaded = client_registry_load();
     ESP_LOGI(TAG, "Client registry loaded %d clients", loaded);
 
+    const char *sta_ssid = get_sta_ssid();
+    const char *sta_pass = get_sta_pass();
+    if (sta_ssid) {
+        ESP_LOGI(TAG, "STA credentials found, will try connecting to: %s", sta_ssid);
+    } else {
+        ESP_LOGI(TAG, "No STA credentials — AP-only mode. Set via NVS: sta_ssid / sta_pass");
+    }
+
     ESP_ERROR_CHECK(wifi_manager_init_ap_with_sta_fallback(
         WIFI_AP_SSID, WIFI_AP_PASS,
-        WIFI_STA_SSID, WIFI_STA_PASS,
+        sta_ssid, sta_pass,
         STA_TIMEOUT_SEC));
     vTaskDelay(pdMS_TO_TICKS(1000));
 

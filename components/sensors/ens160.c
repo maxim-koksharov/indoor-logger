@@ -1,6 +1,8 @@
 #include "ens160.h"
 #include "esp_log.h"
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "ens160";
 
@@ -57,13 +59,15 @@ int ens160_init(i2c_port_t port) {
         return -1;
     }
 
-    ret = ens160_write_reg(port, ENS160_REG_OPMODE, 0x01);
+    ret = ens160_write_reg(port, ENS160_REG_OPMODE, 0x02);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set OPMODE");
+        ESP_LOGE(TAG, "Failed to set OPMODE to STANDARD");
         return -1;
     }
 
-    ESP_LOGI(TAG, "ENS160 initialized");
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ESP_LOGI(TAG, "ENS160 initialized in STANDARD mode");
     return 0;
 }
 
@@ -89,8 +93,20 @@ int ens160_set_env(i2c_port_t port, float temperature, float humidity) {
 
 int ens160_read(i2c_port_t port, ens160_data_t *data) {
     uint8_t status;
-    esp_err_t ret = ens160_read_regs(port, ENS160_REG_DATA_STATUS, &status, 1);
-    if (ret != ESP_OK) return -1;
+    esp_err_t ret;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        ret = ens160_read_regs(port, ENS160_REG_DATA_STATUS, &status, 1);
+        if (ret != ESP_OK) return -1;
+
+        if (status & 0x02) {
+            break;
+        }
+
+        if (attempt < 2) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
 
     if (!(status & 0x02)) {
         return -2;

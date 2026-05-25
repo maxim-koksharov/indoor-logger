@@ -9,6 +9,10 @@ extern "C" {
 
 #define ENS160_I2C_ADDR 0x53
 
+#ifndef ENS160_ENABLE
+#define ENS160_ENABLE 1
+#endif
+
 typedef struct {
     uint8_t aqi;
     uint16_t eco2;

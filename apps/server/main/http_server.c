@@ -12,6 +12,24 @@
 static const char *TAG = "http_server";
 static httpd_handle_t server = NULL;
 
+/* --- Helper: extract query param by key --- */
+static const char *get_query_val(const char *query, const char *key, char *out, size_t out_sz) {
+    if (!query || !*query) return NULL;
+    const char *k = strstr(query, key);
+    if (!k) return NULL;
+    k += strlen(key);
+    if (*k != '=') return NULL;
+    k++;
+    const char *e = strchr(k, '&');
+    size_t len = e ? (size_t)(e - k) : strlen(k);
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, k, len);
+    out[len] = '\0';
+    return out;
+}
+
+/* --- Handlers --- */
+
 static esp_err_t index_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, index_html, sizeof(index_html) - 1);
@@ -70,15 +88,15 @@ static esp_err_t clients_get_handler(httpd_req_t *req) {
 }
 
 static esp_err_t client_get_handler(httpd_req_t *req) {
-    char uri[128];
-    strncpy(uri, req->uri, sizeof(uri) - 1);
-    uri[sizeof(uri) - 1] = '\0';
+    char client_id[32] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    if (client_id[0] == '\0') {
+        httpd_resp_send_404(req);
+        return ESP_OK;
+    }
     
-    char *id_start = uri + strlen("/api/clients/");
-    char *id_end = strchr(id_start, '/');
-    if (id_end) *id_end = '\0';
-    
-    client_info_t *client = client_registry_get(id_start);
+    client_info_t *client = client_registry_get(client_id);
     if (client == NULL) {
         httpd_resp_send_404(req);
         return ESP_OK;
@@ -120,14 +138,15 @@ static esp_err_t client_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-static esp_err_t client_upload_post_handler(httpd_req_t *req) {
-    char uri[128];
-    strncpy(uri, req->uri, sizeof(uri) - 1);
-    uri[sizeof(uri) - 1] = '\0';
-    
-    char *id_start = uri + strlen("/api/clients/");
-    char *upload_pos = strstr(id_start, "/upload");
-    if (upload_pos) *upload_pos = '\0';
+static esp_err_t upload_post_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    if (client_id[0] == '\0') {
+        ESP_LOGW(TAG, "Upload: missing client id");
+        httpd_resp_send_404(req);
+        return ESP_OK;
+    }
     
     char *buf = malloc(req->content_len + 1);
     if (buf == NULL) {
@@ -149,79 +168,83 @@ static esp_err_t client_upload_post_handler(httpd_req_t *req) {
     
     cJSON *root = cJSON_Parse(buf);
     free(buf);
-    
     if (root == NULL) {
         httpd_resp_send_500(req);
         return ESP_OK;
     }
     
-    int count = 0;
+    cJSON *records_array = NULL;
     if (cJSON_IsArray(root)) {
+        records_array = root;
+    } else {
+        records_array = cJSON_GetObjectItem(root, "readings");
+    }
+    
+    int count = 0;
+    if (records_array && cJSON_IsArray(records_array)) {
         cJSON *item;
-        cJSON_ArrayForEach(item, root) {
+        cJSON_ArrayForEach(item, records_array) {
             data_record_t rec = {0};
             rec.timestamp = (uint32_t)time(NULL);
             
-            cJSON *temp = cJSON_GetObjectItem(item, "temp");
-            if (temp) rec.temp_x100 = (int16_t)(temp->valuedouble * 100);
+            cJSON *t = cJSON_GetObjectItem(item, "t");
+            if (!t) t = cJSON_GetObjectItem(item, "temp");
+            if (t) rec.temp_x100 = (int16_t)(t->valuedouble * 100);
             
-            cJSON *hum = cJSON_GetObjectItem(item, "hum");
-            if (hum) rec.hum_x100 = (uint16_t)(hum->valuedouble * 100);
+            cJSON *h = cJSON_GetObjectItem(item, "h");
+            if (!h) h = cJSON_GetObjectItem(item, "hum");
+            if (h) rec.hum_x100 = (uint16_t)(h->valuedouble * 100);
             
-            cJSON *eco2 = cJSON_GetObjectItem(item, "eco2");
-            if (eco2) rec.eco2 = (uint16_t)eco2->valuedouble;
+            cJSON *c = cJSON_GetObjectItem(item, "c");
+            if (!c) c = cJSON_GetObjectItem(item, "eco2");
+            if (c) rec.eco2 = (uint16_t)c->valuedouble;
             
-            cJSON *tvoc = cJSON_GetObjectItem(item, "tvoc");
-            if (tvoc) rec.tvoc = (uint16_t)tvoc->valuedouble;
+            cJSON *v = cJSON_GetObjectItem(item, "v");
+            if (!v) v = cJSON_GetObjectItem(item, "tvoc");
+            if (v) rec.tvoc = (uint16_t)v->valuedouble;
             
-            cJSON *aqi = cJSON_GetObjectItem(item, "aqi");
-            if (aqi) rec.aqi = (uint8_t)aqi->valuedouble;
+            cJSON *a = cJSON_GetObjectItem(item, "a");
+            if (!a) a = cJSON_GetObjectItem(item, "aqi");
+            if (a) rec.aqi = (uint8_t)a->valuedouble;
             
-            if (data_store_append(id_start, &rec) == 0) {
-                count++;
-            }
+            data_store_append(client_id, &rec);
+            count++;
         }
     }
     
     cJSON_Delete(root);
     
-    client_registry_update(id_start, "", "");
+    client_registry_update(client_id, "", "");
     client_registry_save();
     
-    cJSON *resp = cJSON_CreateObject();
-    cJSON_AddNumberToObject(resp, "accepted", count);
-    
-    char *json = cJSON_PrintUnformatted(resp);
+    char resp_buf[64];
+    int resp_len = snprintf(resp_buf, sizeof(resp_buf), "{\"accepted\":%d}", count);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json, strlen(json));
-    
-    cJSON_Delete(resp);
-    free(json);
+    httpd_resp_send(req, resp_buf, resp_len);
+    ESP_LOGI(TAG, "Upload: accepted %d records from %s", count, client_id);
     return ESP_OK;
 }
 
-static esp_err_t client_data_get_handler(httpd_req_t *req) {
-    char uri[128];
-    strncpy(uri, req->uri, sizeof(uri) - 1);
-    uri[sizeof(uri) - 1] = '\0';
-    
-    char *id_start = uri + strlen("/api/clients/");
-    char *data_pos = strstr(id_start, "/data");
-    if (data_pos) *data_pos = '\0';
+static esp_err_t data_get_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    if (client_id[0] == '\0') {
+        httpd_resp_send_404(req);
+        return ESP_OK;
+    }
     
     uint32_t offset = 0;
     uint32_t limit = 100;
     
-    char *query = strchr(req->uri, '?');
     if (query) {
-        char offset_str[16] = {0};
-        char limit_str[16] = {0};
-        httpd_query_key_value(query + 1, "offset", offset_str, sizeof(offset_str));
-        httpd_query_key_value(query + 1, "limit", limit_str, sizeof(limit_str));
-        if (offset_str[0]) offset = atoi(offset_str);
-        if (limit_str[0]) limit = atoi(limit_str);
+        char tmp[16] = {0};
+        get_query_val(query, "offset", tmp, sizeof(tmp));
+        if (tmp[0]) offset = atoi(tmp);
+        tmp[0] = '\0';
+        get_query_val(query, "limit", tmp, sizeof(tmp));
+        if (tmp[0]) limit = atoi(tmp);
     }
-    
     if (limit > 1000) limit = 1000;
     
     data_record_t *records = malloc(limit * sizeof(data_record_t));
@@ -230,7 +253,7 @@ static esp_err_t client_data_get_handler(httpd_req_t *req) {
         return ESP_OK;
     }
     
-    int read_count = data_store_read_range(id_start, offset, limit, records, limit);
+    int read_count = data_store_read_range(client_id, offset, limit, records, limit);
     
     cJSON *root = cJSON_CreateArray();
     for (int i = 0; i < read_count; i++) {
@@ -291,23 +314,23 @@ int http_server_start(void) {
     httpd_register_uri_handler(server, &clients_uri);
     
     httpd_uri_t client_uri = {
-        .uri = "/api/clients/*",
+        .uri = "/api/client",
         .method = HTTP_GET,
         .handler = client_get_handler
     };
     httpd_register_uri_handler(server, &client_uri);
     
     httpd_uri_t upload_uri = {
-        .uri = "/api/clients/*/upload",
+        .uri = "/api/upload",
         .method = HTTP_POST,
-        .handler = client_upload_post_handler
+        .handler = upload_post_handler
     };
     httpd_register_uri_handler(server, &upload_uri);
     
     httpd_uri_t data_uri = {
-        .uri = "/api/clients/*/data",
+        .uri = "/api/data",
         .method = HTTP_GET,
-        .handler = client_data_get_handler
+        .handler = data_get_handler
     };
     httpd_register_uri_handler(server, &data_uri);
     

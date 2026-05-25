@@ -77,7 +77,7 @@ async function fetchClients() {
 }
 async function showDetail(id) {
   currentClient = id;
-  const r = await fetch(`/api/clients/${id}`);
+  const r = await fetch(`/api/client?id=${id}`);
   const d = await r.json();
   document.getElementById('detail').style.display = 'block';
   document.getElementById('detail-title').textContent = d.name || d.id;
