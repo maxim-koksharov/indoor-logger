@@ -1,173 +1,161 @@
 # TODO
 
-## Phase 1: Monorepo Restructuring
+## Согласованные архитектурные решения
 
-### New project structure
-```
-/esp/project/
-├── CMakeLists.txt              # Root CMake (includes ESP-IDF)
-├── components/                 # Shared libraries
-│   ├── display/                # SSD1306 OLED driver + Display wrapper
-│   │   ├── CMakeLists.txt
-│   │   ├── ssd1306.c
-│   │   ├── Display.c
-│   │   ├── pthread_stubs.c
-│   │   └── include/
-│   │       ├── ssd1306.h
-│   │       └── Display.h
-│   ├── sensors/                # ENS160 + AHT21 sensor drivers
-│   │   ├── CMakeLists.txt
-│   │   ├── ens160.c
-│   │   ├── aht21.c
-│   │   └── include/
-│   │       ├── ens160.h
-│   │       └── aht21.h
-│   ├── fonts/                  # Font library
-│   │   ├── CMakeLists.txt
-│   │   ├── fonts.c
-│   │   ├── fonts.h
-│   │   └── data/
-│   └── wifi/                   # WiFi connection helper (new)
-│       ├── CMakeLists.txt
-│       ├── wifi_manager.c
-│       └── include/
-│           └── wifi_manager.h
-├── apps/
-│   ├── server/                 # Server application (16MB ESP8266)
-│   │   ├── CMakeLists.txt
-│   │   ├── main/
-│   │   │   └── main.c
-│   │   └── sdkconfig
-│   └── client/                 # Client application (4MB/16MB ESP8266)
-│       ├── CMakeLists.txt
-│       ├── main/
-│       │   └── main.c
-│       └── sdkconfig
-└── TODO.md
-```
+- **Client ID**: кастомный строковый ID (`living_room`, `kitchen` и т.д.), задается при прошивке через Kconfig/NVS.
+- **Время**: гибрид — сервер ставит `time(NULL)` при получении. Client отправляет `uptime_sec` как fallback.
+- **Хранение**: бинарный packed формат (14 байт/запись), кольцевой буфер per-client в SPIFFS.
+- **Веб-интерфейс**: zero-SPIFFS — HTML/CSS/JS встроены в `.rodata` через `const char[]`. Весь SPIFFS под данные.
+- **WiFi Server**: AP mode (`AirMon-Server`) + STA fallback (если заданы креденшиалы).
+- **Client**: мониторинговый режим — deep sleep 5 мин → измерение → отправка → сон. Кнопка GPIO12: wake-up, показ текущих данных 10 сек.
+- **Upload**: JSON (`POST /api/clients/<id>/upload`), хранение на сервере — бинарное.
+- **OTA**: не нужен ни на сервере, ни на клиенте.
 
-### Tasks
-- [x] Move sensor drivers from `main/` to `components/sensors/`
-- [x] Create `components/wifi/` with WiFi connection helper
-- [x] Create `apps/server/` directory structure
-- [x] Create `apps/client/` directory structure
-- [x] Update root `CMakeLists.txt` for monorepo
-- [x] Create `apps/server/CMakeLists.txt` with proper component dependencies
-- [x] Create `apps/client/CMakeLists.txt` with proper component dependencies
-- [x] Create `apps/server/sdkconfig` (16MB flash, server settings)
-- [x] Create `apps/client/sdkconfig` (4MB/16MB flash, client settings)
-- [x] Move `main/main.c` to `apps/client/main/main.c` as baseline
-- [x] Create `apps/server/main/main.c` with server entry point
-- [x] Create `apps/client/main/main.c` with client entry point
-- [x] Remove old `main/` directory
-- [x] Test build: `cd apps/client && idf.py build`
-- [x] Test build: `cd apps/server && idf.py build`
-- [ ] Remove old `main/` directory
-- [ ] Test build: `cd apps/client && idf.py build`
-- [ ] Test build: `cd apps/server && idf.py build`
+---
 
-## Phase 2: WiFi Infrastructure
+## Phase 1: Server — Partition Table & Data Store
 
-### WiFi Manager Component
-- [ ] Implement `wifi_manager_init()` with STA mode
-- [ ] Implement `wifi_manager_init_ap()` for AP mode (server fallback)
-- [ ] Add WiFi event handlers for connection/disconnection
-- [ ] Add NVS storage for WiFi credentials
-- [ ] Add auto-reconnect with exponential backoff
+### S1: Partition Table (Server 16MB, no OTA)
+- [ ] Создать `apps/server/partitions_server.csv`:
+  - nvs (0x4000), phy_init (0x1000)
+  - ota_0 (1MB), ota_1 (1MB) — оставить на всякий случай, но OTA не используется
+  - spiffs (~14MB, offset 0x210000) — под данные клиентов
+- [ ] Обновить `apps/server/sdkconfig`:
+  - `CONFIG_PARTITION_TABLE_CUSTOM=y`
+  - `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_server.csv"`
+- [ ] Проверка: `cd apps/server && idf.py build` проходит без ошибок.
 
-### Server WiFi Setup
-- [ ] Server starts in AP mode by default (creates its own network)
-- [ ] Server assigns static IP (192.168.4.1)
-- [ ] Server can optionally connect to existing WiFi (STA mode)
+### S2: Data Store Module (`apps/server/main/data_store.c/h`)
+- [ ] Определить `data_record_t` (packed, 14 байт):
+  - `uint32_t timestamp`, `int16_t temp*100`, `uint16_t hum*100`, `uint16_t eco2`, `uint16_t tvoc`, `uint8_t aqi`, `uint8_t _pad`
+- [ ] Определить `client_file_header_t` (magic, version, client_id[32], max_records, write_idx, count)
+- [ ] Реализовать `data_store_init()` — mount SPIFFS, форматировать при первом старте.
+- [ ] Реализовать `data_store_append(client_id, rec)` — циклическая запись в `/spiffs/<id>.dat`.
+- [ ] Реализовать `data_store_read_range(client_id, offset, limit, out, capacity)` — чтение записей.
+- [ ] Реализовать `data_store_get_count(client_id)`.
+- [ ] Реализовать `data_store_delete_client(client_id)`.
+- [ ] Тест в `main.c`: append 3 записи, read, print — проверить через логи.
 
-### Client WiFi Setup
-- [ ] Client connects to server's AP or existing network
-- [ ] Client stores server IP/hostname in NVS
-- [ ] Client retries connection on failure
+### S3: Client Registry (`apps/server/main/client_registry.c/h`)
+- [ ] `client_info_t` (id[32], name[32], last_seen, online, ip_str[16]).
+- [ ] Массив в RAM (max 16 клиентов).
+- [ ] `client_registry_init()`, `update()`, `get()`, `get_all()`.
+- [ ] `client_registry_check_stale(timeout_sec=360)` — пометить offline.
+- [ ] Сохранение/загрузка в NVS (`client_registry_save/load`).
+- [ ] Тест: рестарт сервера → реестр восстанавливается из NVS.
 
-## Phase 3: Server Application (16MB ESP8266)
+---
 
-### HTTP REST API
-- [ ] Embedded HTTP server (use ESP8266's built-in or lwip + httpd)
-- [ ] `GET /api/clients` - list connected clients
-- [ ] `GET /api/clients/<id>/data` - get raw data from specific client
-- [ ] `GET /api/data` - aggregated data from all clients
-- [ ] `POST /api/clients/<id>/upload` - receive data from client
-- [ ] `GET /api/health` - server health check
+## Phase 2: Server — HTTP REST API
 
-### Web UI Dashboard
-- [ ] Serve static HTML/CSS/JS from flash (SPIFFS/LittleFS)
-- [ ] Real-time data display using WebSocket or polling
-- [ ] Charts for temperature, humidity, eCO2, TVOC over time
-- [ ] Client status overview (online/offline, last seen)
-- [ ] AQI summary across all clients
+### S4: HTTP Server Core (`apps/server/main/http_server.c/h`)
+- [ ] `http_server_init()`, `http_server_start()`.
+- [ ] Endpoint `GET /api/health` → JSON: status, uptime, free_heap, clients_online.
+- [ ] Endpoint `GET /api/clients` → JSON-массив: id, name, online, last_seen, latest values.
+- [ ] Endpoint `GET /api/clients/<id>` → JSON: info + последние N записей (default 24).
+- [ ] Endpoint `POST /api/clients/<id>/upload` → JSON array:
+  - Парсинг `cJSON`, для каждого объекта: `uptime`, `temp`, `hum`, `eco2`, `tvoc`, `aqi`.
+  - Конвертация в `data_record_t` (timestamp = time(NULL), float → fixed-point).
+  - `data_store_append()` + `client_registry_update()`.
+- [ ] Endpoint `GET /api/clients/<id>/data?limit=&offset=` → JSON-массив записей для графиков.
+- [ ] Проверка через `curl`: все endpoints отвечают корректно.
 
-### Data Storage (Server)
-- [ ] Use LittleFS for time-series data storage
-- [ ] Implement data retention policy (e.g., keep 7 days)
-- [ ] Store per-client data in separate files
-- [ ] Implement data aggregation (min/max/avg per hour)
+### S5: Embedded Web UI (`apps/server/main/web_ui.h`)
+- [ ] `index_html[]` — одностраничный UI, inline CSS + JS.
+- [ ] Таблица клиентов: ID, имя, статус (online/offline), время, текущие значения.
+- [ ] Детальная карточка по клику: последние значения крупно + `<canvas>` график (24 точки).
+- [ ] Автообновление: `fetch('/api/clients')` каждые 5 сек.
+- [ ] Тёмная тема, моноширинные цифры, AQI-индикаторы (цвета).
+- [ ] Подключить к `http_server.c` (URI `/` → `index_html`).
+- [ ] Проверка: браузер открывает страницу, видит данные.
 
-## Phase 4: Client Application (4MB/16MB ESP8266)
+---
 
-### Sensor Integration
-- [ ] Initialize ENS160 + AHT21 on I2C bus
-- [ ] Read sensor data at configurable interval (default: 60s)
-- [ ] Handle sensor errors gracefully (retry, skip, log)
-- [ ] Display current readings on OLED
+## Phase 3: Server — WiFi, NTP & Integration
 
-### Display Management
-- [ ] Page 1: Temperature + Humidity (from AHT21)
-- [ ] Page 2: eCO2 + TVOC + AQI (from ENS160)
-- [ ] Page 3: WiFi status + uptime + free heap
-- [ ] Button (GPIO12): cycle pages, long press for config
-- [ ] Auto display-off after 10s, button wakes
+### S6: WiFi Manager Доработка (`components/wifi/`)
+- [ ] Добавить `wifi_manager_init_ap_with_sta_fallback(ap_ssid, ap_pass, sta_ssid, sta_pass)`.
+- [ ] Если STA креденшиалы заданы — `WIFI_MODE_APSTA`, попытка подключения.
+- [ ] Если STA не удался за 30 сек — оставить только AP.
+- [ ] `wifi_manager_get_ap_ip()` — получить IP AP-интерфейса.
 
-### Local Data Storage
-- [ ] NVS: store WiFi credentials, server IP, config settings
-- [ ] LittleFS: store sensor readings when offline
-- [ ] Implement circular buffer for offline data (store up to N readings)
-- [ ] Data format: timestamp, temp, humidity, eCO2, TVOC, AQI
+### S7: NTP & Main Loop
+- [ ] Если STA подключился — запустить SNTP (`esp_netif_sntp_init` или `sntp_setoperatingmode`).
+- [ ] Подождать синхронизации времени.
+- [ ] `main.c` flow: NVS → data_store → registry_load → WiFi → SNTP → http_server.
+- [ ] Основной цикл (vTaskDelay 30000):
+  - `client_registry_check_stale(360)`
+  - `esp_task_wdt_feed()`
+  - ESP_LOGI stats (uptime, heap, clients online)
 
-### Data Sync with Server
-- [ ] HTTP POST to server with batched readings
-- [ ] Retry on failure with exponential backoff
-- [ ] Mark synced data, delete from local storage
-- [ ] Support server request for historical data
+### S8: Server Build & Test
+- [ ] Полная сборка: `cd apps/server && idf.py build`
+- [ ] Эмуляция client через `curl`: отправка JSON upload, проверка отображения в UI.
+- [ ] Рестарт сервера: данные на месте, реестр восстановлен.
 
-## Phase 5: Quality & Testing
+---
 
-### Build & CI
-- [ ] Add `clang-tidy` / `cppcheck` config
-- [ ] Add `.editorconfig`
-- [ ] Add `CMakePresets.json` for build variants
-- [ ] GitHub Actions CI: build both apps on push
+## Phase 4: Client Application
 
-### Testing
-- [ ] Hardware-in-the-loop test harness
-- [ ] I2C scan at boot logs all found devices
-- [ ] Self-test: ENS160 PART_ID + AHT21 calibration check
-- [ ] Server API integration tests
+### C1: Partition Table (Client 4MB, no OTA)
+- [ ] Создать `apps/client/partitions_client.csv`:
+  - nvs (0x4000), phy_init (0x1000)
+  - ota_0 (1MB), ota_1 (1MB)
+  - spiffs (~1.5MB) — под offline-хранилище
+- [ ] Обновить `apps/client/sdkconfig` → custom partition table.
 
-### Code Quality
-- [ ] Enforce naming conventions
-- [ ] Const correctness pass
-- [ ] Mark internal functions `static`
-- [ ] Add logical error codes (enum) instead of magic numbers
-- [ ] Add Doxygen-style comments to public APIs
+### C2: Local Data Storage (`apps/client/main/data_storage.c/h`)
+- [ ] Тот же `data_record_t` (14 байт), но без `timestamp` → `uint32_t uptime_sec`.
+- [ ] Кольцевой буфер в SPIFFS (`/spiffs/offline.dat`), max ~1440 записей (сутки при 1 мин).
+- [ ] API: `storage_init()`, `storage_append(rec)`, `storage_read_unsynced()`, `storage_mark_synced(count)`.
 
-### Safety & Robustness
-- [ ] Watchdog feed in main loops
-- [ ] I2C bus error handling (retry N times)
-- [ ] ENS160 burn-in countdown display (48 hours)
-- [ ] Sensor read timeout handling
-- [ ] Flash wear leveling for NVS/LittleFS
+### C3: Sensor Task & Deep Sleep
+- [ ] Задача `sensor_task`: read ENS160 + AHT21 → `storage_append()` → `display_show_quick()` (если wake-up по таймеру).
+- [ ] Deep sleep 5 мин (300 сек) по таймеру (`esp_sleep_enable_timer_wakeup`).
+- [ ] Wake-up source: GPIO12 (кнопка, active low) + таймер.
+- [ ] При пробуждении по кнопке: показать текущие данные 10 сек → `display_off()` → deep sleep.
+- [ ] При пробуждении по таймеру: измерение → попытка sync → deep sleep.
 
-## Phase 6: Features (Roadmap)
+### C4: WiFi & Sync Task
+- [ ] `wifi_manager_init_sta_from_nvs()` — читать SSID/PWD из NVS.
+- [ ] Задача `sync_task`:
+  - Если WiFi connected: читать `storage_read_unsynced()`, отправить `POST /api/clients/<id>/upload`.
+  - При успехе: `storage_mark_synced()`.
+  - При ошибке: отложить до следующего wake-up.
+- [ ] Задать `client_id` через Kconfig (`CONFIG_CLIENT_ID="living_room"`) или NVS.
 
-- [ ] Deep sleep between reads (client, configurable interval)
-- [ ] OTA firmware updates
-- [ ] Multiple client support (server handles N clients)
-- [ ] Data export (CSV download from web UI)
-- [ ] Alert thresholds (e.g., eCO2 > 1000ppm)
-- [ ] Mobile app / Telegram bot integration
+### C5: Display & Button (Wake-up Mode)
+- [ ] При wake-up по таймеру: мгновенное измерение, короткий показ (1–2 сек) статуса (WiFi, sync), затем сон.
+- [ ] При wake-up по кнопке: полный показ 10 сек:
+  - Страница 1: Temp + Hum
+  - Страница 2: eCO2 + TVOC + AQI
+  - Страница 3: Client ID + WiFi status + uptime
+  - ENS160 burn-in countdown (48 часов).
+- [ ] Добавить debounce 50 мс в `button.c`.
+
+### C6: Client Build & Test
+- [ ] `cd apps/client && idf.py build`
+- [ ] Тест без сервера: deep sleep → wake → измерение → локальное хранение → сон.
+- [ ] Тест с сервером: данные доходят, отображаются в веб-UI.
+
+---
+
+## Phase 5: Quality & Robustness
+
+- [ ] I2C retry (3 попытки с 10 мс delay) во всех драйверах.
+- [ ] Sensor read timeout: если ENS160 status не ready за X сек — skip reading.
+- [ ] Watchdog feed в каждом цикле (`esp_task_wdt_feed()`).
+- [ ] Doxygen-комментарии к публичным API (`data_store.h`, `client_registry.h`, `http_server.h`).
+- [ ] `.editorconfig` и `clang-format` (опционально).
+- [ ] Удалить старый `main/` каталог в корне (если ещё есть).
+- [ ] Обновить `README.md` (или `AGENTS.md`) с инструкциями по сборке и прошивке.
+
+---
+
+## Phase 6: Roadmap (будущие фичи)
+
+- [ ] Alert thresholds (eCO2 > 1000 ppm, AQI > 3) — server-side логирование warning.
+- [ ] Data export CSV (`GET /api/clients/<id>/export.csv`).
+- [ ] Telegram бот / Push-уведомления при алертах.
+- [ ] Настройка имён клиентов через веб-UI.
+- [ ] Поддержка нескольких сенсоров на одном client (опционально).
