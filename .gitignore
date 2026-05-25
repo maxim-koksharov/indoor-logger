@@ -48,3 +48,7 @@ sdkconfig*
 # debug information files
 *.dwo
 .docker_home/.bash_history
+
+#environment
+.env/
+.env*
