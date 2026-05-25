@@ -1,0 +1,17 @@
+menu "Client Configuration"
+
+    config CLIENT_ID
+        string "Client device identifier"
+        default "test_client"
+        help
+            Unique identifier for this client device (e.g. living_room, kitchen).
+            Used as the client ID when uploading data to the server.
+
+    config CLIENT_DISPLAY_TIMEOUT_SEC
+        int "Display auto-off timeout (seconds)"
+        default 10
+        range 0 300
+        help
+            Time in seconds before the display turns off. Set to 0 for always-on.
+
+endmenu

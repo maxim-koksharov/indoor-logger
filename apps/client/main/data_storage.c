@@ -5,6 +5,10 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifndef CONFIG_CLIENT_ID
+#define CONFIG_CLIENT_ID CONFIG_CLIENT_ID
+#endif
+
 static const char *TAG = "data_storage";
 static const char *DATA_FILE = "/spiffs/client_data.dat";
 
@@ -78,7 +82,7 @@ int data_storage_init(void) {
         memset(&s_header, 0, sizeof(s_header));
         s_header.magic = MAGIC;
         s_header.version = VERSION;
-        strncpy(s_header.client_id, "test_client", sizeof(s_header.client_id) - 1);
+        strncpy(s_header.client_id, CONFIG_CLIENT_ID, sizeof(s_header.client_id) - 1);
         s_header.max_records = MAX_RECORDS;
         s_header.write_idx = 0;
         s_header.total_written = 0;
@@ -105,7 +109,7 @@ int data_storage_init(void) {
             memset(&s_header, 0, sizeof(s_header));
             s_header.magic = MAGIC;
             s_header.version = VERSION;
-            strncpy(s_header.client_id, "test_client", sizeof(s_header.client_id) - 1);
+            strncpy(s_header.client_id, CONFIG_CLIENT_ID, sizeof(s_header.client_id) - 1);
             s_header.max_records = MAX_RECORDS;
             s_header.write_idx = 0;
             s_header.total_written = 0;

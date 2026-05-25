@@ -13,6 +13,7 @@
 #include "driver/i2c.h"
 #include "nvs_flash.h"
 #include "esp_task_wdt.h"
+#include "esp_spiffs.h"
 
 static const char *TAG = "client";
 
@@ -23,11 +24,21 @@ static const char *TAG = "client";
 #define WIFI_SYNC_INTERVAL_MS 30000
 #define MAIN_LOOP_DELAY_MS 500
 
+#ifndef CONFIG_CLIENT_ID
+#define CONFIG_CLIENT_ID "test_client"
+#endif
+
+#ifndef CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC
+#define CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC 10
+#endif
+
 static Display display;
 static const font_info_t *display_font = NULL;
 
 static aht21_data_t last_aht_data = {0};
 static ens160_data_t last_ens_data = {0};
+
+static uint32_t client_uptime_sec = 0;
 
 static void client_task(void *pvParameters) {
     TickType_t last_sensor_read = 0;
@@ -35,15 +46,17 @@ static void client_task(void *pvParameters) {
     int loop_count = 0;
     bool wifi_connected = false;
 
-    ESP_LOGI(TAG, "[TASK] Client task started");
+    ESP_LOGI(TAG, "[TASK] Client task started (client_id=%s, display=%ds)",
+             CONFIG_CLIENT_ID, CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC);
 
     while (1) {
         TickType_t now = xTaskGetTickCount();
         loop_count++;
+        esp_task_wdt_reset();
 
         if ((now - last_sensor_read) >= pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS)) {
             ESP_LOGI(TAG, "[SENSORS] Reading...");
-            
+
             aht21_data_t aht_data = {0};
             ens160_data_t ens_data = {0};
 
@@ -73,10 +86,12 @@ static void client_task(void *pvParameters) {
             ESP_LOGI(TAG, "[SENSORS] ENS160 disabled");
 #endif
 
+            client_uptime_sec = (uint32_t)(now * portTICK_PERIOD_MS / 1000);
+
             // Save record
             client_record_t record = {
-                .timestamp = time(NULL),
-                .uptime_sec = (uint32_t)(now * portTICK_PERIOD_MS / 1000),
+                .timestamp = client_uptime_sec,
+                .uptime_sec = client_uptime_sec,
                 .temperature = last_aht_data.temperature,
                 .humidity = last_aht_data.humidity,
                 .eco2 = last_ens_data.eco2,
@@ -87,6 +102,8 @@ static void client_task(void *pvParameters) {
 
             if (data_storage_append(&record) == 0) {
                 ESP_LOGI(TAG, "[STORAGE] Saved, total=%d", data_storage_get_count());
+            } else {
+                ESP_LOGW(TAG, "[STORAGE] Append failed, SPIFFS may be full");
             }
 
             // Update display with latest readings
@@ -153,11 +170,15 @@ void app_main(void) {
     display_init(&display, SDA_PIN, SCL_PIN, SSD1306_I2C_ADDR_0);
 
 #if ENS160_ENABLE
-    if (ens160_init(I2C_NUM_0) != 0) {
+    int ens_init_ret = ens160_init(I2C_NUM_0);
+    if (ens_init_ret != 0) {
         ESP_LOGE(TAG, "Failed to initialize ENS160");
     }
+#else
+    int ens_init_ret = -1;
 #endif
-    if (aht21_init(I2C_NUM_0) != 0) {
+    int aht_init_ret = aht21_init(I2C_NUM_0);
+    if (aht_init_ret != 0) {
         ESP_LOGE(TAG, "Failed to initialize AHT21");
     }
 
@@ -168,7 +189,7 @@ void app_main(void) {
     }
     ESP_LOGI(TAG, "Data storage initialized, %d records", data_storage_get_count());
 
-    if (wifi_sync_init("test_client") != ESP_OK) {
+    if (wifi_sync_init(CONFIG_CLIENT_ID) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize WiFi sync");
     }
 
@@ -181,6 +202,29 @@ void app_main(void) {
     display_on(&display);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Self-test summary
+    {
+        size_t spiffs_total = 0, spiffs_used = 0;
+        esp_err_t spiffs_ret = esp_spiffs_info("storage", &spiffs_total, &spiffs_used);
+        int storage_count = data_storage_get_count();
+        ESP_LOGI(TAG, "=== SELF-TEST ===");
+        ESP_LOGI(TAG, "  NVS: OK");
+        ESP_LOGI(TAG, "  I2C: init OK (SDA=GPIO4 SCL=GPIO5)");
+        ESP_LOGI(TAG, "  Display: initialized");
+#if ENS160_ENABLE
+        ESP_LOGI(TAG, "  ENS160: %s", (ens_init_ret == 0) ? "detected" : "not detected or warming");
+#else
+        ESP_LOGI(TAG, "  ENS160: disabled (ENS160_ENABLE=0)");
+#endif
+        ESP_LOGI(TAG, "  AHT21: %s", (aht_init_ret == 0) ? "detected" : "failed");
+        ESP_LOGI(TAG, "  SPIFFS: %s (total=%u used=%u)",
+                 spiffs_ret == ESP_OK ? "OK" : "FAIL", spiffs_total, spiffs_used);
+        ESP_LOGI(TAG, "  Storage: %d records saved", storage_count);
+        ESP_LOGI(TAG, "  Client ID: %s", CONFIG_CLIENT_ID);
+        ESP_LOGI(TAG, "  Heap at init: %d KB", (int)(esp_get_free_heap_size() / 1024));
+        ESP_LOGI(TAG, "=== END SELF-TEST ===");
+    }
 
     // Create client task with 4KB stack
     xTaskCreate(client_task, "client_task", 4096, NULL, 5, NULL);
