@@ -36,23 +36,35 @@ static esp_err_t aht21_read_raw(i2c_port_t port, uint8_t *data, size_t len) {
 
 int aht21_init(i2c_port_t port) {
     uint8_t cmd[] = { AHT21_CMD_INIT, 0x08, 0x00 };
-    esp_err_t ret = aht21_write(port, cmd, 3);
+    esp_err_t ret;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        ret = aht21_write(port, cmd, 3);
+        if (ret == ESP_OK) break;
+        ESP_LOGW(TAG, "Init attempt %d failed: %s", attempt + 1, esp_err_to_name(ret));
+        if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(10));
+    }
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send init command");
+        ESP_LOGE(TAG, "Failed to send init command after 3 attempts");
         return -1;
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
 
     uint8_t status;
-    ret = aht21_read_raw(port, &status, 1);
+    for (int attempt = 0; attempt < 3; attempt++) {
+        ret = aht21_read_raw(port, &status, 1);
+        if (ret == ESP_OK) break;
+        ESP_LOGW(TAG, "Status read attempt %d failed: %s", attempt + 1, esp_err_to_name(ret));
+        if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(10));
+    }
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read status");
+        ESP_LOGE(TAG, "Failed to read status after 3 attempts");
         return -1;
     }
 
     if (!(status & 0x18)) {
-        ESP_LOGE(TAG, "AHT21 not calibrated");
+        ESP_LOGE(TAG, "AHT21 not calibrated (status=0x%02X)", status);
         return -1;
     }
 
@@ -62,19 +74,35 @@ int aht21_init(i2c_port_t port) {
 
 int aht21_read(i2c_port_t port, aht21_data_t *data) {
     uint8_t cmd[] = { AHT21_CMD_TRIGGER, 0x33, 0x00 };
-    esp_err_t ret = aht21_write(port, cmd, 3);
+    esp_err_t ret;
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+        ret = aht21_write(port, cmd, 3);
+        if (ret == ESP_OK) break;
+        ESP_LOGW(TAG, "Trigger attempt %d failed: %s", attempt + 1, esp_err_to_name(ret));
+        if (attempt < 2) vTaskDelay(pdMS_TO_TICKS(10));
+    }
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to trigger measurement");
+        ESP_LOGE(TAG, "Failed to trigger measurement after 3 attempts");
         return -1;
     }
 
     vTaskDelay(pdMS_TO_TICKS(80));
 
     uint8_t buf[7];
-    ret = aht21_read_raw(port, buf, 7);
+    for (int attempt = 0; attempt < 3; attempt++) {
+        ret = aht21_read_raw(port, buf, 7);
+        if (ret == ESP_OK) break;
+        ESP_LOGW(TAG, "Read attempt %d failed: %s", attempt + 1, esp_err_to_name(ret));
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read data");
+        ESP_LOGE(TAG, "Failed to read data after 3 attempts");
         return -1;
+    }
+
+    if ((buf[0] & 0x80)) {
+        ESP_LOGW(TAG, "AHT21 busy, data may be stale");
     }
 
     uint32_t hum_raw = ((uint32_t)buf[1] << 12) | ((uint32_t)buf[2] << 4) | (buf[3] >> 4);
