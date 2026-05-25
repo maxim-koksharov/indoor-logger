@@ -1,0 +1,46 @@
+name: opencode-oneoff
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+  # Проект будет доступен внутри контейнера здесь:
+  working_dir: /workspace
+
+  # Запуск от юзера хоста (Linux). Не root.
+  user: "${UID}:${GID}"
+
+  # Настраиваем переменные окружения, указывая на домашнюю директорию,
+  # к которой у пользователя гарантированно будут права на запись.
+  environment:
+    - HOME=/workspace/.opencode-home
+    - XDG_CONFIG_HOME=/workspace/.opencode-home/.config
+    - XDG_DATA_HOME=/workspace/.opencode-home/.local/share
+    - XDG_CACHE_HOME=/workspace/.opencode-home/.cache
+
+  volumes:
+    # === 1) ПАПКА ПРОЕКТА ===
+    # Монтируем текущую папку проекта (где лежит compose.yml) в /workspace
+    - ".:/workspace:rw"
+
+    # === 2) OPENCODE: КОНФИГИ + АУТЕНТИФИКАЦИЯ ===
+    # Монтируем конфигурационные папки хоста напрямую в новые XDG-пути внутри контейнера
+    - "${HOME}/.config/opencode:/workspace/.opencode-home/.config/opencode:rw"
+    - "${HOME}/.local/share/opencode:/workspace/.opencode-home/.local/share/opencode:rw"
+    - "${HOME}/.cache/opencode:/workspace/.opencode-home/.cache/opencode:rw"
+
+  # === 3) ПРОБРОС ТУЛЧЕЙНА И ПЛАТЫ ===
+  # Пробрасываем USB-программатор (например, CP2102 или CH340) для прошивки ESP8266
+  devices:
+    - "/dev/ttyUSB0:/dev/ttyUSB0"
+    - "/dev/ttyUSB1:/dev/ttyUSB1"
+
+  # Для удобной интерактивной работы
+  tty: true
+  stdin_open: true
+
+services:
+  bash:
+    <<: *common
+    command: ["bash"]
