@@ -1,6 +1,7 @@
 #include "wifi_sync.h"
 #include "data_storage.h"
 #include "wifi_manager.h"
+#include "ens160.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
@@ -92,11 +93,18 @@ esp_err_t wifi_sync_upload_unsynced(void) {
         int t_int = (int)records[i].temperature;
         int t_dec = (int)(records[i].temperature * 10) % 10;
         if (t_dec < 0) t_dec = -t_dec;
+#if ENS160_ENABLE
         offset += snprintf(json_buf + offset, sizeof(json_buf) - offset,
             "{\"ts\":%ld,\"up\":%u,\"t\":%d.%d,\"h\":%d,\"c\":%u,\"v\":%u,\"a\":%u}",
             (long)records[i].timestamp, records[i].uptime_sec,
             t_int, t_dec, (int)records[i].humidity,
             records[i].eco2, records[i].tvoc, records[i].aqi);
+#else
+        offset += snprintf(json_buf + offset, sizeof(json_buf) - offset,
+            "{\"ts\":%ld,\"up\":%u,\"t\":%d.%d,\"h\":%d}",
+            (long)records[i].timestamp, records[i].uptime_sec,
+            t_int, t_dec, (int)records[i].humidity);
+#endif
     }
     
     offset += snprintf(json_buf + offset, sizeof(json_buf) - offset, "]}");

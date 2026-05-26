@@ -325,7 +325,7 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
             limit = (val > 0) ? (uint32_t)val : 500;
         }
     }
-    if (limit > 500) limit = 500;
+    if (limit > 2000) limit = 2000;
 
     uint32_t available = data_store_get_count(client_id);
     data_record_t *records = malloc(limit * sizeof(data_record_t));
