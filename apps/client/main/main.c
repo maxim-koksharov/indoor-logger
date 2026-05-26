@@ -21,9 +21,10 @@ static const char *TAG = "client";
 #define SDA_PIN 4
 #define SCL_PIN 5
 
-#define SENSOR_READ_INTERVAL_MS 5000
-#define WIFI_SYNC_INTERVAL_MS 30000
-#define MAIN_LOOP_DELAY_MS 500
+#define SENSOR_READ_INTERVAL_MS 300000
+#define WIFI_SYNC_INTERVAL_MS 300000
+#define DISPLAY_SWITCH_INTERVAL_MS 3000
+#define MAIN_LOOP_DELAY_MS 1000
 
 #ifndef CONFIG_CLIENT_ID
 #define CONFIG_CLIENT_ID "test_client"
@@ -60,12 +61,43 @@ static aht21_data_t last_aht_data = {0};
 static ens160_data_t last_ens_data = {0};
 
 static uint32_t client_uptime_sec = 0;
+static int display_screen = 0;
+
+static void update_display(void) {
+    display_clear_fb(&display);
+    int t_int = (int)last_aht_data.temperature;
+    int t_dec = (int)(last_aht_data.temperature * 10) % 10;
+    if (t_dec < 0) t_dec = -t_dec;
+
+    if (display_screen == 0) {
+        char line1[16], line2[16];
+        snprintf(line1, sizeof(line1), "%d.%dC", t_int, t_dec);
+        uint32_t up = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS / 1000);
+        int h = up / 3600;
+        int m = (up % 3600) / 60;
+        int s = up % 60;
+        snprintf(line2, sizeof(line2), "%02d:%02d:%02d", h, m, s);
+        int w1 = strlen(line1) * 12;
+        int w2 = strlen(line2) * 12;
+        display_draw_string_scaled(&display, display_font, (128 - w1) / 2, 0, line1, 2);
+        display_draw_string_scaled(&display, display_font, (128 - w2) / 2, 17, line2, 2);
+    } else {
+        char line1[16], line2[16];
+        snprintf(line1, sizeof(line1), "%d%%RH %ue", (int)last_aht_data.humidity, last_ens_data.eco2);
+        snprintf(line2, sizeof(line2), "%uTV AQI%u", last_ens_data.tvoc, last_ens_data.aqi);
+        display_draw_string_scaled(&display, display_font, 0, 0, line1, 2);
+        display_draw_string_scaled(&display, display_font, 0, 17, line2, 2);
+    }
+    display_present(&display);
+}
 
 static void client_task(void *pvParameters) {
     TickType_t last_sensor_read = 0;
     TickType_t last_wifi_sync = 0;
+    TickType_t last_screen_switch = 0;
     int loop_count = 0;
     bool wifi_connected = false;
+    update_display();
 
     ESP_LOGI(TAG, "[TASK] Client task started (client_id=%s, display=%ds)",
              CONFIG_CLIENT_ID, CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC);
@@ -127,27 +159,17 @@ static void client_task(void *pvParameters) {
                 ESP_LOGW(TAG, "[STORAGE] Append failed, SPIFFS may be full");
             }
 
-            // Update display with latest readings
-            char line1[24], line2[24];
-            int t_int = (int)last_aht_data.temperature;
-            int t_dec = (int)(last_aht_data.temperature * 10) % 10;
-            if (t_dec < 0) t_dec = -t_dec;
-            if (last_ens_data.aqi > 0) {
-                snprintf(line1, sizeof(line1), "%d.%dC %d%% AQI%u", t_int, t_dec, (int)last_aht_data.humidity, last_ens_data.aqi);
-                snprintf(line2, sizeof(line2), "eCO2%u TVOC%u", last_ens_data.eco2, last_ens_data.tvoc);
-            } else {
-                snprintf(line1, sizeof(line1), "%d.%dC %d%%", t_int, t_dec, (int)last_aht_data.humidity);
-                snprintf(line2, sizeof(line2), "ENS warming...");
-            }
-            display_clear_fb(&display);
-            display_draw_string_scaled(&display, display_font, 0, 0, line1, 2);
-            display_draw_string_scaled(&display, display_font, 0, 17, line2, 2);
-            display_present(&display);
-
+            update_display();
             last_sensor_read = now;
         }
 
-        // WiFi sync every 30 seconds
+        if ((now - last_screen_switch) >= pdMS_TO_TICKS(DISPLAY_SWITCH_INTERVAL_MS)) {
+            display_screen = !display_screen;
+            update_display();
+            last_screen_switch = now;
+        }
+
+        // WiFi sync every 5 minutes
         if ((now - last_wifi_sync) >= pdMS_TO_TICKS(WIFI_SYNC_INTERVAL_MS)) {
             if (!wifi_connected || !wifi_sync_is_connected()) {
                 wifi_connected = false;
