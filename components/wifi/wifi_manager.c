@@ -14,6 +14,17 @@ static bool s_connected = false;
 static char s_ip_str[16] = {0};
 static char s_ap_ip_str[16] = {0};
 static EventGroupHandle_t s_wifi_event_group = NULL;
+static uint32_t s_retry_delay_sec = 60;
+static int32_t s_last_disconnect_reason = 0;
+static bool s_wifi_inited = false;
+
+static char s_current_ssid[32] = {0};
+static char s_backup_ssid[32] = {0};
+static char s_backup_pass[64] = {0};
+static bool s_has_backup = false;
+static bool s_on_primary = true;
+static int s_consecutive_no_ap = 0;
+#define MAX_CONSECUTIVE_NO_AP 3
 #define STA_CONNECTED_BIT BIT0
 #define STA_FAIL_BIT BIT1
 
@@ -28,14 +39,56 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             case WIFI_EVENT_STA_CONNECTED:
                 ESP_LOGI(TAG, "WiFi STA connected");
                 break;
-            case WIFI_EVENT_STA_DISCONNECTED:
-                ESP_LOGW(TAG, "WiFi STA disconnected");
+            case WIFI_EVENT_STA_DISCONNECTED: {
+                wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
                 s_connected = false;
+                s_last_disconnect_reason = event->reason;
+                
+                switch (event->reason) {
+                    case 201: // WIFI_REASON_NO_AP_FOUND
+                        s_retry_delay_sec = 60;
+                        s_consecutive_no_ap++;
+                        ESP_LOGW(TAG, "WiFi network not found (attempt %d/%d), retry in %u sec",
+                                 s_consecutive_no_ap, MAX_CONSECUTIVE_NO_AP, s_retry_delay_sec);
+                        
+                        if (s_has_backup && s_consecutive_no_ap >= MAX_CONSECUTIVE_NO_AP) {
+                            s_on_primary = !s_on_primary;
+                            s_consecutive_no_ap = 0;
+                            
+                            const char *ssid = s_on_primary ? s_current_ssid : s_backup_ssid;
+                            const char *pass = s_on_primary ? NULL : s_backup_pass;
+                            
+                            wifi_config_t wifi_config = {0};
+                            strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+                            if (pass) {
+                                strncpy((char *)wifi_config.sta.password, pass, sizeof(wifi_config.sta.password) - 1);
+                            }
+                            ESP_LOGI(TAG, "Switching to SSID: %s", ssid);
+                            esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config);
+                        }
+                        break;
+                    case 2:  // WIFI_REASON_AUTH_EXPIRE
+                    case 4:  // WIFI_REASON_AUTH_FAIL
+                    case 204: // WIFI_REASON_INVALID_PMK
+                        s_retry_delay_sec = 3600;
+                        s_consecutive_no_ap = 0;
+                        ESP_LOGW(TAG, "WiFi authentication failed (wrong password?), retry in %u sec", s_retry_delay_sec);
+                        break;
+                    default:
+                        s_retry_delay_sec = 60;
+                        s_consecutive_no_ap = 0;
+                        ESP_LOGW(TAG, "WiFi disconnected (reason=%d), retry in %u sec", event->reason, s_retry_delay_sec);
+                        break;
+                }
+                
                 if (s_wifi_event_group) {
                     xEventGroupSetBits(s_wifi_event_group, STA_FAIL_BIT);
                 }
+                
+                vTaskDelay(pdMS_TO_TICKS(s_retry_delay_sec * 1000));
                 esp_wifi_connect();
                 break;
+            }
             case WIFI_EVENT_AP_START: {
                 ESP_LOGI(TAG, "WiFi AP started");
                 tcpip_adapter_ip_info_t ip_info;
@@ -54,6 +107,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 ip4addr_ntoa_r(&event->ip_info.ip, s_ip_str, sizeof(s_ip_str));
                 ESP_LOGI(TAG, "Got IP: %s", s_ip_str);
                 s_connected = true;
+                s_consecutive_no_ap = 0;
                 if (s_wifi_event_group) {
                     xEventGroupSetBits(s_wifi_event_group, STA_CONNECTED_BIT);
                 }
@@ -66,6 +120,24 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 }
 
 esp_err_t wifi_manager_init_sta(const char *ssid, const char *password) {
+    if (s_wifi_inited) {
+        ESP_LOGI(TAG, "WiFi already initialized, updating credentials for %s", ssid);
+        strncpy(s_current_ssid, ssid, sizeof(s_current_ssid) - 1);
+        s_on_primary = true;
+        s_consecutive_no_ap = 0;
+        
+        wifi_config_t wifi_config = {0};
+        strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+        if (password) {
+            strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+        }
+        
+        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+        esp_wifi_disconnect();
+        esp_wifi_connect();
+        return ESP_OK;
+    }
+
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -95,10 +167,13 @@ esp_err_t wifi_manager_init_sta(const char *ssid, const char *password) {
         strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
     }
 
+    strncpy(s_current_ssid, ssid, sizeof(s_current_ssid) - 1);
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    s_wifi_inited = true;
     ESP_LOGI(TAG, "WiFi STA initialized, connecting to %s", ssid);
     return ESP_OK;
 }
@@ -233,4 +308,36 @@ esp_err_t wifi_manager_get_ap_ip(char *ip_str, size_t len) {
         return ESP_OK;
     }
     return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t wifi_manager_get_mac(char *mac_str, size_t len) {
+    if (len < 18) return ESP_ERR_INVALID_ARG;
+    
+    uint8_t mac[6];
+    esp_err_t ret = esp_wifi_get_mac(WIFI_IF_STA, mac);
+    if (ret != ESP_OK) return ret;
+    
+    snprintf(mac_str, len, "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return ESP_OK;
+}
+
+void wifi_manager_set_backup(const char *ssid, const char *password) {
+    if (!ssid || strlen(ssid) == 0) {
+        s_has_backup = false;
+        return;
+    }
+    
+    strncpy(s_backup_ssid, ssid, sizeof(s_backup_ssid) - 1);
+    if (password) {
+        strncpy(s_backup_pass, password, sizeof(s_backup_pass) - 1);
+    }
+    s_has_backup = true;
+    s_on_primary = true;
+    s_consecutive_no_ap = 0;
+    ESP_LOGI(TAG, "Backup WiFi configured: %s", s_backup_ssid);
+}
+
+const char *wifi_manager_get_current_ssid(void) {
+    return s_current_ssid;
 }

@@ -66,6 +66,31 @@ esp_err_t wifi_manager_init_ap_with_sta_fallback(const char *ap_ssid, const char
  */
 esp_err_t wifi_manager_get_ap_ip(char *ip_str, size_t len);
 
+/**
+ * Get the WiFi MAC address.
+ *
+ * @param mac_str Buffer to store MAC address string (min 18 bytes, format: "AA:BB:CC:DD:EE:FF")
+ * @param len Length of the buffer
+ * @return ESP_OK on success, error code on failure
+ */
+esp_err_t wifi_manager_get_mac(char *mac_str, size_t len);
+
+/**
+ * Set backup STA credentials. If the primary network is unreachable after
+ * multiple retries, the manager will automatically switch to backup.
+ *
+ * @param ssid Backup WiFi SSID (NULL or empty to disable backup)
+ * @param password Backup WiFi password
+ */
+void wifi_manager_set_backup(const char *ssid, const char *password);
+
+/**
+ * Get the currently active SSID being used for STA connection.
+ *
+ * @return Pointer to internal SSID string (do not modify)
+ */
+const char *wifi_manager_get_current_ssid(void);
+
 #ifdef __cplusplus
 }
 #endif

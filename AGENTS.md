@@ -4,8 +4,10 @@
 
 ESP8266 embedded firmware monorepo (ESP8266 RTOS SDK / ESP-IDF style) with:
 - **Shared components**: SSD1306 OLED display driver, ENS160+AHT21 sensor drivers, WiFi manager, fonts
-- **Server app** (16MB ESP8266): WiFi AP, HTTP REST API, web dashboard, data aggregation
+- **Server app** (16MB ESP8266): STA WiFi, HTTP REST API, web dashboard, data aggregation
 - **Client app** (4MB/16MB ESP8266): OLED display, sensor readings, local storage, WiFi data sync to server
+
+**WiFi Mode:** Both devices connect to your home router (STA-only). No AP mode.
 
 C code only. All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}` when included from C++ files.
 
@@ -59,15 +61,17 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 │   ├── display/                # SSD1306 OLED driver + C Display wrapper
 │   ├── sensors/                # ENS160 + AHT21 sensor drivers
 │   ├── fonts/                  # Bitmap font library (GLCD, Terminus, etc.)
-│   └── wifi/                   # WiFi connection helper (STA/AP/APSTA)
+│   └── wifi/                   # WiFi connection helper (STA-only with retry logic)
 ├── apps/
 │   ├── server/                 # Server application (16MB Flash ESP8266)
 │   │   ├── CMakeLists.txt
 │   │   ├── main/               # main.c, data_store.c, client_registry.c, http_server.c
+│   │   ├── Kconfig.projbuild   # WiFi SSID/pass options
 │   │   └── sdkconfig
 │   └── client/                 # Client application (4MB ESP8266)
 │       ├── CMakeLists.txt
 │       ├── main/               # main.c, button.c, data_storage.c, wifi_sync.c
+│       ├── Kconfig.projbuild   # Client ID, display timeout, WiFi SSID/pass, server IP
 │       └── sdkconfig
 ├── TODO.md
 ├── AGENTS.md
@@ -126,18 +130,48 @@ httpd_resp_set_type(req, "text/plain");
 httpd_resp_send(req, "error message", 13);
 ```
 
+### WiFi retry behavior (STA mode)
+
+The `wifi_manager` implements automatic reconnection with different delays based on disconnect reason:
+
+| Disconnect reason | Code | Retry delay |
+|---|---|---|
+| Network not found | 201 (`WIFI_REASON_NO_AP_FOUND`) | 60 seconds |
+| Wrong password | 2, 4, 204 (`AUTH_EXPIRE`, `AUTH_FAIL`, `INVALID_PMK`) | 3600 seconds (1 hour) |
+| Other reasons | various | 60 seconds |
+
+After 3 consecutive `NO_AP_FOUND` events, the manager automatically switches to the backup SSID (if configured). On next connection, it switches back to primary.
+
+### `mdns` component is broken on ESP8266 v3.4
+
+The ESP8266 RTOS SDK v3.4 mDNS component references `ip6_addr_t` which is not defined. Instead, use UDP broadcast discovery (implemented in server and client).
+
 ## Server timestamp fallback
 
-When NTP is unavailable (AP-only mode), `time(NULL)` returns 0. The server uses `server_get_timestamp()` which returns `time(NULL)` if valid (> 0), otherwise returns uptime since server start. Declare `extern uint32_t server_get_timestamp(void);` in any C file that needs it.
+When NTP is unavailable, `time(NULL)` returns 0. The server uses `server_get_timestamp()` which returns `time(NULL)` if valid (> 0), otherwise returns uptime since server start. Declare `extern uint32_t server_get_timestamp(void);` in any C file that needs it.
 
-## Client Kconfig options
+## Kconfig options
 
-Client app has Kconfig options in `apps/client/main/Kconfig.projbuild`:
+### Server (`apps/server/main/Kconfig.projbuild`)
+
+| Option | Default | Description |
+|---|---|---|
+| `CONFIG_SERVER_STA_SSID` | `""` | Primary WiFi SSID for STA mode |
+| `CONFIG_SERVER_STA_PASS` | `""` | Primary WiFi password for STA mode |
+| `CONFIG_SERVER_BACKUP_SSID` | `""` | Backup WiFi SSID (switch after 3 consecutive NO_AP_FOUND) |
+| `CONFIG_SERVER_BACKUP_PASS` | `""` | Backup WiFi password |
+
+Credentials can also be stored in NVS (`wifi:sta_ssid`, `wifi:sta_pass`). NVS takes precedence over Kconfig.
+
+### Client (`apps/client/main/Kconfig.projbuild`)
 
 | Option | Default | Description |
 |---|---|---|
 | `CONFIG_CLIENT_ID` | `test_client` | Client identifier for uploads |
 | `CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC` | 10 | Display auto-off timeout (0 = always-on) |
+| `CONFIG_CLIENT_WIFI_SSID` | `""` | WiFi SSID (same as server) |
+| `CONFIG_CLIENT_WIFI_PASS` | `""` | WiFi password (same as server) |
+| `CONFIG_CLIENT_DISCOVER_TIMEOUT_MS` | 3000 | UDP broadcast discovery timeout |
 
 ## Self-test at startup
 
@@ -164,7 +198,7 @@ When disabled: ENS160 init, read, and set_env calls are compiled out. Temperatur
 
 ## Server WiFi STA mode
 
-The server supports connecting to an existing WiFi network (STA) alongside its AP `AirMon-Server`. STA credentials are stored in NVS namespace `wifi` with keys `sta_ssid` and `sta_pass`:
+The server connects to your home router in STA-only mode (no AP). STA credentials are stored in NVS namespace `wifi` with keys `sta_ssid` and `sta_pass`:
 
 ```bash
 # Set STA credentials (one-time, via custom firmware or provisioning)
@@ -172,7 +206,18 @@ nvs_set_str("wifi", "sta_ssid", "MyHomeWiFi");
 nvs_set_str("wifi", "sta_pass", "MyPassword");
 ```
 
-If no STA credentials exist in NVS, the server runs in AP-only mode. The `wifi_manager_init_ap_with_sta_fallback()` function tries STA first; if it fails within the timeout, it falls back to AP-only.
+If no STA credentials exist in NVS, the server uses credentials from Kconfig (`CONFIG_SERVER_STA_SSID`, `CONFIG_SERVER_STA_PASS`). If both are empty, the server will not connect to WiFi.
+
+The `wifi_manager` automatically retries connection with different delays:
+- Network not found: retry every 60 seconds
+- Wrong password: retry every 3600 seconds (1 hour)
+- Other errors: retry every 60 seconds
+
+After 3 consecutive `NO_AP_FOUND` events, the manager automatically switches to the backup SSID (if configured). On next connection, it switches back to primary.
+
+### UDP Broadcast Discovery
+
+The server runs a UDP listener on port 5000 that responds to `AIRMON_DISCOVER` packets with `AIRMON_RESPONSE <ip>`. The client uses this to automatically find the server on the local network, regardless of which WiFi network (primary or backup) either device is connected to.
 
 ## Hardware
 
@@ -444,12 +489,12 @@ No address conflicts exist. All three devices can coexist on the same bus.
 
 ## Architecture
 
-- `apps/server/main/main.c` — Server entry: NVS → data_store → registry_load → WiFi (AP+STA fallback) → SNTP → HTTP server start → main loop with stale checker
+- `apps/server/main/main.c` — Server entry: NVS → data_store → registry_load → WiFi (STA-only) → SNTP → HTTP server start → main loop with stale checker
 - `apps/client/main/main.c` — Client entry: NVS → display_init → sensor init → storage init → WiFi sync init → separate FreeRTOS task `client_task` for main loop (sensor reads, display updates, WiFi sync)
 - `components/display/` — C Display wrapper around `ssd1306.c` SSD1306 driver (third-party, MIT licensed)
 - `components/sensors/` — ENS160 and AHT21 I2C sensor drivers
 - `components/fonts/` — Compile-time bitmap font library (GLCD 5x7, Terminus, etc.)
-- `components/wifi/` — WiFi manager: STA, AP, AP+STA fallback modes
+- `components/wifi/` — WiFi manager: STA-only with retry logic (60s for network not found, 60min for auth fail)
 
 ## Configuration
 

@@ -11,19 +11,32 @@
 static const char *TAG = "wifi_sync";
 static char s_client_id[32] = {0};
 static char s_server_url[128] = {0};
+static char s_server_ip[16] = {0};
+static bool s_ip_resolved = false;
 
 esp_err_t wifi_sync_init(const char *client_id) {
     strncpy(s_client_id, client_id, sizeof(s_client_id) - 1);
+    strncpy(s_server_ip, "192.168.2.200", sizeof(s_server_ip) - 1);
+    s_ip_resolved = true;
     ESP_LOGI(TAG, "WiFi sync initialized for client: %s", s_client_id);
+    ESP_LOGI(TAG, "Server IP configured: %s", s_server_ip);
     return ESP_OK;
 }
 
-esp_err_t wifi_sync_connect_to_server(const char *ap_ssid, const char *ap_pass) {
-    ESP_LOGI(TAG, "Connecting to server AP: %s", ap_ssid);
+esp_err_t wifi_sync_discover_server(uint32_t timeout_ms) {
+    (void)timeout_ms;
+    ESP_LOGI(TAG, "Using known server IP: %s", s_server_ip);
+    return ESP_OK;
+}
+
+esp_err_t wifi_sync_connect_to_server(const char *ssid, const char *password) {
+    ESP_LOGI(TAG, "Connecting to WiFi: %s", ssid);
     
-    esp_err_t ret = wifi_manager_init_sta(ap_ssid, ap_pass);
+    s_ip_resolved = false;
+    
+    esp_err_t ret = wifi_manager_init_sta(ssid, password);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to connect to AP: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to connect to WiFi: %s", esp_err_to_name(ret));
         return ret;
     }
     
@@ -34,11 +47,20 @@ esp_err_t wifi_sync_connect_to_server(const char *ap_ssid, const char *ap_pass) 
     }
     
     if (!wifi_manager_is_connected()) {
-        ESP_LOGE(TAG, "Connection timeout");
+        ESP_LOGE(TAG, "WiFi connection timeout");
         return ESP_ERR_TIMEOUT;
     }
     
-    snprintf(s_server_url, sizeof(s_server_url), "http://192.168.4.1/api/upload?id=%s", s_client_id);
+    if (!s_ip_resolved) {
+        ESP_LOGI(TAG, "Discovering server via UDP broadcast...");
+        ret = wifi_sync_discover_server(3000);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Server discovery failed");
+            return ESP_ERR_NOT_FOUND;
+        }
+    }
+    
+    snprintf(s_server_url, sizeof(s_server_url), "http://%s/api/upload?id=%s", s_server_ip, s_client_id);
     
     ESP_LOGI(TAG, "Server URL: %s", s_server_url);
     return ESP_OK;

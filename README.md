@@ -4,18 +4,26 @@ ESP8266-based indoor air quality monitoring system with OLED display, ENS160+AHT
 
 ## System Overview
 
-Two ESP8266 devices communicating over WiFi:
+Two ESP8266 devices communicating over WiFi (both connect to your home router):
 
 ```
-┌────────────────────┐       WiFi (AP)        ┌────────────────────┐
+┌────────────────────┐       WiFi (STA)        ┌────────────────────┐
 │   Server (16MB)    │◄──────────────────────►│   Client (4MB)     │
-│                    │   192.168.4.0/24       │                    │
-│  WiFi AP+STA       │                        │  OLED Display      │
-│  HTTP REST API     │                        │  ENS160 + AHT21    │
-│  Web Dashboard     │                        │  Local SPIFFS      │
-│  Data Aggregation  │                        │  WiFi sync         │
-└────────────────────┘                        └────────────────────┘
+│                    │   Your Home Router      │                    │
+│  STA mode          │       192.168.2.x       │  STA mode          │
+│  HTTP REST API     │                         │  OLED Display      │
+│  Web Dashboard     │                         │  ENS160 + AHT21    │
+│  Data Aggregation  │                         │  Local SPIFFS      │
+│  UDP discovery     │                         │  WiFi sync         │
+│  Backup WiFi       │                         │  UDP discovery     │
+└────────────────────┘                         └────────────────────┘
 ```
+
+**WiFi Mode:**
+- **Server**: STA-only (connects to your router). Supports primary + backup SSID.
+- **Client**: STA-only (connects to the same router). Discovers server via UDP broadcast.
+
+**Server Discovery:** Client sends UDP broadcast to port 5000. Server responds with its IP. No static IP needed.
 
 ## Hardware Requirements
 
@@ -55,8 +63,8 @@ All three I2C devices share a single bus (bus 0):
 export IDF_PATH=/esp/ESP8266_RTOS_SDK
 
 # Menuconfig (настройка параметров)
-cd apps/client && idf.py menuconfig   # Client ID, таймаут дисплея
-cd apps/server && idf.py menuconfig   # Режим flash, CPU frequency
+cd apps/client && idf.py menuconfig   # Client ID, display timeout, WiFi SSID/pass
+cd apps/server && idf.py menuconfig   # WiFi SSID/pass, flash, CPU frequency
 
 # Сборка
 cd apps/client && idf.py build
@@ -69,6 +77,56 @@ cd apps/server && idf.py -p /dev/ttyUSB1 flash
 # Очистка
 cd apps/client && idf.py fullclean
 ```
+
+## Настройка WiFi
+
+WiFi SSID и пароль задаются через `menuconfig` при сборке прошивки.
+
+### Сервер
+
+```bash
+cd apps/server
+idf.py menuconfig
+# Server Configuration → Primary WiFi SSID & Password
+#                      → Backup WiFi SSID & Password (опционально)
+idf.py build
+idf.py -p /dev/ttyUSB1 flash
+```
+
+**Режим работы:**
+- Сервер подключается к вашему роутеру (STA mode)
+- Поддерживает основной и резервный WiFi (при 3 неудачных попытках переключается)
+- Раздаёт UDP discovery-сервис на порту 5000
+- Клиент автоматически находит сервер через UDP broadcast
+- При недоступности сети → повторяет подключение каждые 60 сек
+- При неверном пароле → повторяет каждые 60 мин
+
+**NVS (альтернатива menuconfig):**
+Креденшиалы можно сохранить в NVS (выживают перепрошивку):
+```c
+// Через provisioning или отладочный скрипт:
+nvs_set_str("wifi", "sta_ssid", "YourNetwork");
+nvs_set_str("wifi", "sta_pass", "YourPassword");
+nvs_commit();
+```
+NVS имеет приоритет над menuconfig.
+
+### Клиент
+
+```bash
+cd apps/client
+idf.py menuconfig
+# Client Configuration → WiFi SSID (same as server)
+#                      → WiFi password (same as server)
+#                      → Server discovery timeout (ms, default 3000)
+idf.py build
+idf.py -p /dev/ttyUSB0 flash
+```
+
+**Режим работы:**
+- Клиент подключается к тому же роутеру (STA mode)
+- Отправляет UDP broadcast на порт 5000 для поиска сервера
+- Автоматически использует IP, полученный от сервера, для upload данных
 
 ### Что такое `menuconfig` и зачем он нужен?
 
@@ -129,15 +187,19 @@ ser.close(); print(buf.decode('utf-8', errors='replace'))
   NVS: OK
   Registry: 0 clients loaded, 16 slots free
   HTTP: OK
-  SNTP: not available (AP-only)
-  STA: not configured (AP-only)
-  Time source: uptime counter
-  AP IP: 192.168.4.1
+  SNTP: synced
+  STA: connected
+  STA config: YourNetwork
+  Time source: NTP
+  IP: 192.168.1.100
   Heap: 102 KB free
 === END SELF-TEST ===
 ```
 
 ## API Endpoints (Server)
+
+После подключения к роутеру сервер доступен по IP, выданному DHCP (или статическому).
+Используйте IP напрямую: `http://192.168.1.100/`
 
 | Method | URI | Description |
 |---|---|---|
@@ -174,9 +236,15 @@ Each client's data is stored in `/spiffs/<client_id>.dat` as a binary ring buffe
 
 ### Server STA Mode
 
-Сервер может подключаться к домашней WiFi для NTP-синхронизации.
-Креденшиалы — в NVS (`wifi:sta_ssid`, `wifi:sta_pass`).
-Если не заданы — сервер работает в AP-only режиме без NTP (таймстемпы = uptime).
+Сервер подключается к домашней WiFi (роутер) для работы HTTP API.
+Креденшиалы задаются через `menuconfig` (Server Configuration → SERVER_STA_SSID/PASS,
+SERVER_BACKUP_SSID/PASS) или сохраняются в NVS (`wifi:sta_ssid`, `wifi:sta_pass`).
+
+**Retry поведение:**
+- При недоступности сети (network not found) → повтор каждые 60 сек
+- При неверном пароле (auth failed) → повтор каждые 60 мин
+- При других ошибках подключения → повтор каждые 60 сек
+- После 3 последовательных `NO_AP_FOUND` → переключение на backup SSID (если настроен)
 
 ### ENS160
 
@@ -196,6 +264,12 @@ ENS160 требует ~3 минут прогрева для первого чт�
 - **`esp_task_wdt_add()`**: Not available in v3.4. Use `esp_task_wdt_reset()` in each loop.
 - **`httpd_resp_send_err()`**: Not available in v3.4. Use `httpd_resp_send_404()`/`httpd_resp_send_500()` or manually set type+send.
 - **HTTP server URI wildcards**: ESP-IDF v3.4 does exact `strncmp` matching only. No `*` wildcard support. Use exact paths with query parameters.
+- **mDNS not available on ESP8266**: mdns.h references `ip6_addr_t` which is not defined. Use UDP broadcast discovery (port 5000) instead.
+- **WiFi retry behavior**: 
+  - Network not found (reason 201) → retry after 60 seconds
+  - Wrong password (reason 2, 4, 204) → retry after 3600 seconds (1 hour)
+  - Other disconnect reasons → retry after 60 seconds
+  - After 3 consecutive NO_AP_FOUND → automatically switch to backup SSID
 
 ## Components
 
@@ -216,7 +290,10 @@ ENS160 + AHT21 → sensor_read()
         ▼
 data_storage_append()  ← SPIFFS ring buffer
         │
-        ▼ (every 30s)
+        ▼ (every 30s, via router)
+UDP broadcast → port 5000 → discovery
+        │
+        ▼
 wifi_sync_upload()  ─── POST /api/upload?id=<id> ──→  data_store_append()
                                                           │
                                                           ▼
@@ -225,8 +302,30 @@ wifi_sync_upload()  ─── POST /api/upload?id=<id> ──→  data_store_app
                                                      Web UI (GET /)
 ```
 
+**Discovery Protocol:**
+1. Клиент отправляет `AIRMON_DISCOVER` на UDP broadcast:5000
+2. Сервер отвечает `AIRMON_RESPONSE <ip>`
+3. Клиент кэширует IP и использует его для всех upload-запросов
+4. При ошибке upload → повторное discovery на следующем цикле sync
+
 ## Project Structure
 
+```
+├── components/               # Shared IDF-style components
+│   ├── display/              # SSD1306 OLED driver + C wrapper
+│   ├── sensors/              # ENS160 + AHT21 I2C drivers
+│   ├── fonts/                # Bitmap font library
+│   └── wifi/                 # WiFi manager (STA-only with retry logic)
+├── apps/
+│   ├── server/               # Server firmware (16MB flash)
+│   │   └── main/             # main.c, data_store.c, client_registry.c, http_server.c
+│   │       └── Kconfig.projbuild  # WiFi SSID/pass options
+│   └── client/               # Client firmware (4MB flash)
+│       └── main/             # main.c, data_storage.c, wifi_sync.c, button.c
+│           └── Kconfig.projbuild  # Client ID, display timeout, WiFi SSID/pass, server IP
+├── README.md
+├── AGENTS.md
+└── TODO.md
 ```
 ├── components/               # Shared IDF-style components
 │   ├── display/              # SSD1306 OLED driver + C wrapper

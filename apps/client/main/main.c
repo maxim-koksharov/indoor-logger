@@ -4,6 +4,7 @@
 #include "button.h"
 #include "data_storage.h"
 #include "wifi_sync.h"
+#include "wifi_manager.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -30,6 +31,26 @@ static const char *TAG = "client";
 
 #ifndef CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC
 #define CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC 10
+#endif
+
+#ifndef CONFIG_CLIENT_WIFI_SSID
+#define CONFIG_CLIENT_WIFI_SSID ""
+#endif
+
+#ifndef CONFIG_CLIENT_WIFI_PASS
+#define CONFIG_CLIENT_WIFI_PASS ""
+#endif
+
+#ifndef CONFIG_CLIENT_DISCOVER_TIMEOUT_MS
+#define CONFIG_CLIENT_DISCOVER_TIMEOUT_MS 3000
+#endif
+
+#ifndef CONFIG_CLIENT_BACKUP_SSID
+#define CONFIG_CLIENT_BACKUP_SSID ""
+#endif
+
+#ifndef CONFIG_CLIENT_BACKUP_PASS
+#define CONFIG_CLIENT_BACKUP_PASS ""
 #endif
 
 static Display display;
@@ -128,11 +149,16 @@ static void client_task(void *pvParameters) {
 
         // WiFi sync every 30 seconds
         if ((now - last_wifi_sync) >= pdMS_TO_TICKS(WIFI_SYNC_INTERVAL_MS)) {
-            if (!wifi_connected) {
+            if (!wifi_connected || !wifi_sync_is_connected()) {
+                wifi_connected = false;
                 ESP_LOGI(TAG, "[WIFI] Connecting...");
-                if (wifi_sync_connect_to_server("AirMon-Server", "12345678") == ESP_OK) {
-                    wifi_connected = true;
-                    ESP_LOGI(TAG, "[WIFI] Connected!");
+                if (strlen(CONFIG_CLIENT_WIFI_SSID) > 0) {
+                    if (wifi_sync_connect_to_server(CONFIG_CLIENT_WIFI_SSID, CONFIG_CLIENT_WIFI_PASS) == ESP_OK) {
+                        wifi_connected = true;
+                        ESP_LOGI(TAG, "[WIFI] Connected!");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "[WIFI] No SSID configured (CONFIG_CLIENT_WIFI_SSID)");
                 }
             }
 
@@ -192,6 +218,13 @@ void app_main(void) {
     if (wifi_sync_init(CONFIG_CLIENT_ID) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize WiFi sync");
     }
+    
+    if (strlen(CONFIG_CLIENT_BACKUP_SSID) > 0) {
+        wifi_manager_set_backup(CONFIG_CLIENT_BACKUP_SSID, CONFIG_CLIENT_BACKUP_PASS);
+        ESP_LOGI(TAG, "Backup WiFi configured: %s", CONFIG_CLIENT_BACKUP_SSID);
+    }
+    
+    ESP_LOGI(TAG, "Server discovery: UDP broadcast on port 5000");
 
     display_font = font_builtin_fonts[FONT_FACE_GLCD5x7];
 

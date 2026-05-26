@@ -6,9 +6,12 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "lwip/apps/sntp.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
 #include "esp_spiffs.h"
 #include "wifi_manager.h"
 #include "data_store.h"
@@ -17,11 +20,9 @@
 
 static const char *TAG = "server";
 
-#define WIFI_AP_SSID "AirMon-Server"
-#define WIFI_AP_PASS "12345678"
-#define STA_TIMEOUT_SEC 30
 #define STALE_TIMEOUT_SEC 360
 #define MAIN_LOOP_INTERVAL_MS 30000
+#define UDP_DISCOVER_PORT 5000
 
 static uint32_t server_start_tick = 0;
 
@@ -100,6 +101,71 @@ static void init_sntp(void) {
     }
 }
 
+static void udp_discovery_task(void *pvParameters) {
+    char server_ip[16] = {0};
+    (void)pvParameters;
+
+    while (1) {
+        if (!wifi_manager_is_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        wifi_manager_get_ip(server_ip, sizeof(server_ip));
+        if (strlen(server_ip) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock < 0) {
+            ESP_LOGW(TAG, "UDP discovery: socket create failed");
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            continue;
+        }
+
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(UDP_DISCOVER_PORT);
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            ESP_LOGW(TAG, "UDP discovery: bind failed");
+            close(sock);
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "UDP discovery listening on port %d", UDP_DISCOVER_PORT);
+
+        char buf[64];
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(from);
+
+        while (wifi_manager_is_connected()) {
+            int len = recvfrom(sock, buf, sizeof(buf) - 1, 0,
+                               (struct sockaddr *)&from, &fromlen);
+            if (len > 0) {
+                buf[len] = '\0';
+                if (strncmp(buf, "AIRMON_DISCOVER", 15) == 0) {
+                    char response[64];
+                    int rlen = snprintf(response, sizeof(response),
+                                        "AIRMON_RESPONSE %s\n", server_ip);
+                    sendto(sock, response, rlen, 0,
+                           (struct sockaddr *)&from, fromlen);
+                    ESP_LOGI(TAG, "UDP discovery: replied to %s",
+                             inet_ntoa(from.sin_addr));
+                }
+            }
+        }
+
+        close(sock);
+        ESP_LOGI(TAG, "UDP discovery: WiFi lost, restarting listener");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
 void app_main(void) {
     ESP_LOGI(TAG, "Server starting...");
 
@@ -125,26 +191,37 @@ void app_main(void) {
 
     const char *sta_ssid = get_sta_ssid();
     const char *sta_pass = get_sta_pass();
-    if (sta_ssid) {
-        ESP_LOGI(TAG, "STA credentials found, will try connecting to: %s", sta_ssid);
-    } else {
-        ESP_LOGI(TAG, "No STA credentials — AP-only mode. Set via NVS: sta_ssid / sta_pass");
+    
+    if (!sta_ssid || strlen(sta_ssid) == 0) {
+        sta_ssid = CONFIG_SERVER_STA_SSID;
+        sta_pass = CONFIG_SERVER_STA_PASS;
     }
-
-    ESP_ERROR_CHECK(wifi_manager_init_ap_with_sta_fallback(
-        WIFI_AP_SSID, WIFI_AP_PASS,
-        sta_ssid, sta_pass,
-        STA_TIMEOUT_SEC));
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    char ip_str[16] = {0};
-    if (wifi_manager_is_connected()) {
-        wifi_manager_get_ip(ip_str, sizeof(ip_str));
-        ESP_LOGI(TAG, "STA connected, IP: %s", ip_str);
-        init_sntp();
+    
+    if (sta_ssid && strlen(sta_ssid) > 0) {
+        ESP_LOGI(TAG, "STA credentials found, will try connecting to: %s", sta_ssid);
+        ESP_ERROR_CHECK(wifi_manager_init_sta(sta_ssid, sta_pass));
+        
+        if (strlen(CONFIG_SERVER_BACKUP_SSID) > 0) {
+            wifi_manager_set_backup(CONFIG_SERVER_BACKUP_SSID, CONFIG_SERVER_BACKUP_PASS);
+            ESP_LOGI(TAG, "Backup WiFi configured: %s", CONFIG_SERVER_BACKUP_SSID);
+        }
+        
+        char ip_str[16] = {0};
+        int retry = 0;
+        while (!wifi_manager_is_connected() && retry < 30) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            retry++;
+        }
+        
+        if (wifi_manager_is_connected()) {
+            wifi_manager_get_ip(ip_str, sizeof(ip_str));
+            ESP_LOGI(TAG, "STA connected, IP: %s", ip_str);
+            init_sntp();
+        } else {
+            ESP_LOGW(TAG, "STA connection timeout, will retry in background");
+        }
     } else {
-        wifi_manager_get_ap_ip(ip_str, sizeof(ip_str));
-        ESP_LOGI(TAG, "AP-only mode, AP IP: %s", ip_str);
+        ESP_LOGW(TAG, "No STA credentials configured (NVS or Kconfig). Server will not connect to WiFi.");
     }
 
     if (http_server_init() != 0) {
@@ -155,7 +232,17 @@ void app_main(void) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
         return;
     }
-    ESP_LOGI(TAG, "HTTP server running at http://%s", ip_str);
+    
+    char server_ip[16] = {0};
+    if (wifi_manager_is_connected()) {
+        wifi_manager_get_ip(server_ip, sizeof(server_ip));
+        ESP_LOGI(TAG, "HTTP server running at http://%s", server_ip);
+    } else {
+        ESP_LOGI(TAG, "HTTP server running (WiFi not connected)");
+    }
+
+    xTaskCreate(udp_discovery_task, "udp_discovery", 2048, NULL, 4, NULL);
+    ESP_LOGI(TAG, "UDP discovery task created");
 
     // Self-test summary
     {
@@ -169,16 +256,22 @@ void app_main(void) {
         ESP_LOGI(TAG, "  Registry: %d clients loaded, %d slots free",
                  loaded, CLIENT_REGISTRY_MAX_CLIENTS - loaded);
         ESP_LOGI(TAG, "  HTTP: OK");
-        ESP_LOGI(TAG, "  SNTP: %s", sntp_ok ? "synced" : "not available (AP-only)");
-        if (sta_ssid) {
-            ESP_LOGI(TAG, "  STA: %s (config=%s, mode=%s)",
-                     wifi_manager_is_connected() ? "connected" : "failed",
-                     sta_ssid, wifi_manager_is_connected() ? "AP+STA" : "AP-only");
+        ESP_LOGI(TAG, "  SNTP: %s", sntp_ok ? "synced" : "not available");
+        ESP_LOGI(TAG, "  STA: %s",
+                 wifi_manager_is_connected() ? "connected" : "not connected");
+        if (sta_ssid && strlen(sta_ssid) > 0) {
+            ESP_LOGI(TAG, "  Primary SSID: %s", sta_ssid);
         } else {
-            ESP_LOGI(TAG, "  STA: not configured (AP-only)");
+            ESP_LOGI(TAG, "  STA: not configured");
         }
+        if (strlen(CONFIG_SERVER_BACKUP_SSID) > 0) {
+            ESP_LOGI(TAG, "  Backup SSID: %s", CONFIG_SERVER_BACKUP_SSID);
+        }
+        ESP_LOGI(TAG, "  UDP discovery: port %d", UDP_DISCOVER_PORT);
         ESP_LOGI(TAG, "  Time source: %s", sntp_ok ? "NTP" : "uptime counter");
-        ESP_LOGI(TAG, "  AP IP: %s", ip_str);
+        if (wifi_manager_is_connected()) {
+            ESP_LOGI(TAG, "  IP: %s", server_ip);
+        }
         ESP_LOGI(TAG, "  Heap: %d KB free", (int)(esp_get_free_heap_size() / 1024));
         ESP_LOGI(TAG, "=== END SELF-TEST ===");
     }

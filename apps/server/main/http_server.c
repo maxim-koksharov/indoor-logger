@@ -4,6 +4,7 @@
 #include "web_ui.h"
 #include <string.h>
 #include <time.h>
+#include <stdlib.h>
 #include <esp_log.h>
 #include <esp_http_server.h>
 #include <esp_system.h>
@@ -14,7 +15,6 @@ static httpd_handle_t server = NULL;
 
 extern uint32_t server_get_timestamp(void);
 
-/* --- Helper: extract query param by key --- */
 static const char *get_query_val(const char *query, const char *key, char *out, size_t out_sz) {
     if (!query || !*query) return NULL;
     const char *k = strstr(query, key);
@@ -30,79 +30,86 @@ static const char *get_query_val(const char *query, const char *key, char *out, 
     return out;
 }
 
-/* --- Handlers --- */
-
 static esp_err_t index_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, index_html, sizeof(index_html) - 1);
     return ESP_OK;
 }
 
+static void fmt_temp(char *buf, size_t sz, int16_t x100) {
+    int sign = (x100 < 0) ? -1 : 1;
+    int val = x100 * sign;
+    snprintf(buf, sz, "%d.%02d", sign < 0 ? -val/100 : val/100, val % 100);
+}
+
+static void fmt_hum(char *buf, size_t sz, uint16_t x100) {
+    snprintf(buf, sz, "%d.%02d", x100 / 100, x100 % 100);
+}
+
 static esp_err_t health_get_handler(httpd_req_t *req) {
-    cJSON *root = cJSON_CreateObject();
-    if (!root) {
-        httpd_resp_send_500(req);
-        return ESP_OK;
-    }
-    cJSON_AddStringToObject(root, "status", "ok");
-    cJSON_AddNumberToObject(root, "uptime", (double)xTaskGetTickCount() * portTICK_PERIOD_MS / 1000.0);
-    cJSON_AddNumberToObject(root, "free_heap", esp_get_free_heap_size());
-    
-    client_info_t clients[CLIENT_REGISTRY_MAX_CLIENTS];
-    int count = client_registry_get_all(clients, CLIENT_REGISTRY_MAX_CLIENTS);
+    int uptime = (xTaskGetTickCount() * portTICK_PERIOD_MS) / 1000;
+    int free_heap = esp_get_free_heap_size();
+
     int online = 0;
-    for (int i = 0; i < count; i++) {
-        if (clients[i].online) online++;
+    client_info_t *clients = malloc(CLIENT_REGISTRY_MAX_CLIENTS * sizeof(client_info_t));
+    if (clients) {
+        int count = client_registry_get_all(clients, CLIENT_REGISTRY_MAX_CLIENTS);
+        for (int i = 0; i < count; i++) {
+            if (clients[i].online) online++;
+        }
+        free(clients);
     }
-    cJSON_AddNumberToObject(root, "clients_online", online);
-    
-    char *json = cJSON_PrintUnformatted(root);
-    if (json) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, json, strlen(json));
-        free(json);
-    } else {
-        httpd_resp_send_500(req);
-    }
-    
-    cJSON_Delete(root);
+
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf),
+        "{\"status\":\"ok\",\"uptime\":%d,\"free_heap\":%d,\"clients_online\":%d}",
+        uptime, free_heap, online);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
     return ESP_OK;
 }
 
 static esp_err_t clients_get_handler(httpd_req_t *req) {
-    client_info_t clients[CLIENT_REGISTRY_MAX_CLIENTS];
-    int count = client_registry_get_all(clients, CLIENT_REGISTRY_MAX_CLIENTS);
-    
-    cJSON *root = cJSON_CreateArray();
-    if (!root) {
+    client_info_t *clients = malloc(CLIENT_REGISTRY_MAX_CLIENTS * sizeof(client_info_t));
+    if (!clients) {
         httpd_resp_send_500(req);
         return ESP_OK;
     }
-    for (int i = 0; i < count; i++) {
-        cJSON *c = cJSON_CreateObject();
-        if (!c) continue;
-        cJSON_AddStringToObject(c, "id", clients[i].id);
-        cJSON_AddStringToObject(c, "name", clients[i].name);
-        cJSON_AddBoolToObject(c, "online", clients[i].online);
-        cJSON_AddNumberToObject(c, "last_seen", clients[i].last_seen);
-        cJSON_AddStringToObject(c, "ip", clients[i].ip_str);
-        
-        uint32_t rec_count = data_store_get_count(clients[i].id);
-        cJSON_AddNumberToObject(c, "records", rec_count);
-        
-        cJSON_AddItemToArray(root, c);
-    }
-    
-    char *json = cJSON_PrintUnformatted(root);
-    if (json) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, json, strlen(json));
-        free(json);
-    } else {
+
+    int count = client_registry_get_all(clients, CLIENT_REGISTRY_MAX_CLIENTS);
+
+    size_t bufsz = 4096;
+    char *buf = malloc(bufsz);
+    if (!buf) {
+        free(clients);
         httpd_resp_send_500(req);
+        return ESP_OK;
     }
-    
-    cJSON_Delete(root);
+    size_t pos = 0;
+    buf[pos++] = '[';
+
+    for (int i = 0; i < count; i++) {
+        if (i > 0 && pos < bufsz) buf[pos++] = ',';
+        uint32_t rec_count = data_store_get_count(clients[i].id);
+        int n = snprintf(buf + pos, bufsz - pos,
+            "{\"id\":\"%s\",\"name\":\"%s\",\"online\":%s,"
+            "\"last_seen\":%lu,\"ip\":\"%s\",\"records\":%lu}",
+            clients[i].id, clients[i].name,
+            clients[i].online ? "true" : "false",
+            (unsigned long)clients[i].last_seen, clients[i].ip_str,
+            (unsigned long)rec_count);
+        if (n > 0) pos += n;
+        if (pos >= bufsz - 128) break;
+    }
+
+    if (pos < bufsz) buf[pos++] = ']';
+    buf[pos] = '\0';
+
+    free(clients);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, pos);
+    free(buf);
     return ESP_OK;
 }
 
@@ -115,57 +122,63 @@ static esp_err_t client_get_handler(httpd_req_t *req) {
         httpd_resp_send(req, "missing id param", 16);
         return ESP_OK;
     }
-    
+
     client_info_t *client = client_registry_get(client_id);
     if (client == NULL) {
         httpd_resp_send_404(req);
         return ESP_OK;
     }
-    
-    cJSON *root = cJSON_CreateObject();
-    if (!root) {
+
+    uint32_t rec_count = data_store_get_count(client->id);
+    uint32_t limit = 24;
+    uint32_t offset = rec_count > limit ? rec_count - limit : 0;
+
+    data_record_t *records = malloc(limit * sizeof(data_record_t));
+    int read_count = 0;
+    if (records) {
+        read_count = data_store_read_range(client->id, offset, limit, records, limit);
+    }
+
+    size_t bufsz = 4096 + read_count * 128;
+    char *buf = malloc(bufsz);
+    if (!buf) {
+        free(records);
         httpd_resp_send_500(req);
         return ESP_OK;
     }
-    cJSON_AddStringToObject(root, "id", client->id);
-    cJSON_AddStringToObject(root, "name", client->name);
-    cJSON_AddBoolToObject(root, "online", client->online);
-    cJSON_AddNumberToObject(root, "last_seen", client->last_seen);
-    cJSON_AddStringToObject(root, "ip", client->ip_str);
-    
-    uint32_t rec_count = data_store_get_count(client->id);
-    cJSON_AddNumberToObject(root, "records", rec_count);
-    
-    data_record_t records[24];
-    int read_count = data_store_read_range(client->id, 
-        rec_count > 24 ? rec_count - 24 : 0, 24, records, 24);
-    
-    cJSON *data = cJSON_CreateArray();
-    if (data) {
-        for (int i = 0; i < read_count; i++) {
-            cJSON *r = cJSON_CreateObject();
-            if (!r) continue;
-            cJSON_AddNumberToObject(r, "timestamp", records[i].timestamp);
-            cJSON_AddNumberToObject(r, "temp", records[i].temp_x100 / 100.0);
-            cJSON_AddNumberToObject(r, "hum", records[i].hum_x100 / 100.0);
-            cJSON_AddNumberToObject(r, "eco2", records[i].eco2);
-            cJSON_AddNumberToObject(r, "tvoc", records[i].tvoc);
-            cJSON_AddNumberToObject(r, "aqi", records[i].aqi);
-            cJSON_AddItemToArray(data, r);
-        }
-        cJSON_AddItemToObject(root, "data", data);
+    size_t pos = 0;
+
+    pos += snprintf(buf + pos, bufsz - pos,
+        "{\"id\":\"%s\",\"name\":\"%s\",\"online\":%s,"
+        "\"last_seen\":%lu,\"ip\":\"%s\",\"records\":%lu,\"data\":[",
+        client->id, client->name,
+        client->online ? "true" : "false",
+        (unsigned long)client->last_seen, client->ip_str,
+        (unsigned long)rec_count);
+
+    for (int i = 0; i < read_count; i++) {
+        if (i > 0 && pos < bufsz) buf[pos++] = ',';
+        char tbuf[16], hbuf[16];
+        fmt_temp(tbuf, sizeof(tbuf), records[i].temp_x100);
+        fmt_hum(hbuf, sizeof(hbuf), records[i].hum_x100);
+        int n = snprintf(buf + pos, bufsz - pos,
+            "{\"timestamp\":%lu,\"temp\":%s,\"hum\":%s,"
+            "\"eco2\":%u,\"tvoc\":%u,\"aqi\":%u}",
+            (unsigned long)records[i].timestamp,
+            tbuf, hbuf, records[i].eco2, records[i].tvoc, records[i].aqi);
+        if (n > 0) pos += n;
+        if (pos >= bufsz - 128) break;
     }
-    
-    char *json = cJSON_PrintUnformatted(root);
-    if (json) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, json, strlen(json));
-        free(json);
-    } else {
-        httpd_resp_send_500(req);
-    }
-    
-    cJSON_Delete(root);
+
+    if (pos < bufsz) buf[pos++] = ']';
+    if (pos < bufsz) buf[pos++] = '}';
+    buf[pos] = '\0';
+
+    free(records);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, pos);
+    free(buf);
     return ESP_OK;
 }
 
@@ -294,10 +307,10 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
         httpd_resp_send(req, "missing id", 10);
         return ESP_OK;
     }
-    
+
     uint32_t offset = 0;
     uint32_t limit = 100;
-    
+
     if (query) {
         char tmp[16] = {0};
         get_query_val(query, "offset", tmp, sizeof(tmp));
@@ -312,10 +325,10 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
             limit = (val > 0) ? (uint32_t)val : 100;
         }
     }
-    if (limit > 1000) limit = 1000;
-    
+    if (limit > 200) limit = 200;
+
     uint32_t available = data_store_get_count(client_id);
-    if (offset >= available) {
+    if (offset >= available || limit == 0) {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "[]", 2);
         return ESP_OK;
@@ -323,62 +336,64 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
     if (limit > available - offset) {
         limit = available - offset;
     }
-    
-    if (limit == 0) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "[]", 2);
-        return ESP_OK;
-    }
-    
+
     data_record_t *records = malloc(limit * sizeof(data_record_t));
     if (records == NULL) {
         ESP_LOGE(TAG, "data_get: OOM (%u records)", limit);
         httpd_resp_send_500(req);
         return ESP_OK;
     }
-    
+
     int read_count = data_store_read_range(client_id, offset, limit, records, limit);
-    
-    cJSON *root = cJSON_CreateArray();
-    if (root) {
-        for (int i = 0; i < read_count; i++) {
-            cJSON *r = cJSON_CreateObject();
-            if (!r) continue;
-            cJSON_AddNumberToObject(r, "timestamp", records[i].timestamp);
-            cJSON_AddNumberToObject(r, "temp", records[i].temp_x100 / 100.0);
-            cJSON_AddNumberToObject(r, "hum", records[i].hum_x100 / 100.0);
-            cJSON_AddNumberToObject(r, "eco2", records[i].eco2);
-            cJSON_AddNumberToObject(r, "tvoc", records[i].tvoc);
-            cJSON_AddNumberToObject(r, "aqi", records[i].aqi);
-            cJSON_AddItemToArray(root, r);
-        }
-    }
-    
-    free(records);
-    
-    char *json = cJSON_PrintUnformatted(root);
-    if (json) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, json, strlen(json));
-        free(json);
-    } else {
+
+    size_t bufsz = 256 + read_count * 128;
+    char *buf = malloc(bufsz);
+    if (!buf) {
+        free(records);
         httpd_resp_send_500(req);
+        return ESP_OK;
     }
-    
-    cJSON_Delete(root);
+    size_t pos = 0;
+    buf[pos++] = '[';
+
+    for (int i = 0; i < read_count; i++) {
+        if (i > 0 && pos < bufsz) buf[pos++] = ',';
+        char tbuf[16], hbuf[16];
+        fmt_temp(tbuf, sizeof(tbuf), records[i].temp_x100);
+        fmt_hum(hbuf, sizeof(hbuf), records[i].hum_x100);
+        int n = snprintf(buf + pos, bufsz - pos,
+            "{\"timestamp\":%lu,\"temp\":%s,\"hum\":%s,"
+            "\"eco2\":%u,\"tvoc\":%u,\"aqi\":%u}",
+            (unsigned long)records[i].timestamp,
+            tbuf, hbuf, records[i].eco2, records[i].tvoc, records[i].aqi);
+        if (n > 0) pos += n;
+        if (pos >= bufsz - 128) break;
+    }
+
+    if (pos < bufsz) buf[pos++] = ']';
+    buf[pos] = '\0';
+
+    free(records);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, pos);
+    free(buf);
     return ESP_OK;
 }
 
 int http_server_init(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 6144;
     config.max_uri_handlers = 10;
-    
+    config.max_open_sockets = 8;
+    config.lru_purge_enable = true;
+
     esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
         return -1;
     }
-    
+
     return 0;
 }
 
@@ -389,42 +404,42 @@ int http_server_start(void) {
         .handler = index_get_handler
     };
     httpd_register_uri_handler(server, &index_uri);
-    
+
     httpd_uri_t health_uri = {
         .uri = "/api/health",
         .method = HTTP_GET,
         .handler = health_get_handler
     };
     httpd_register_uri_handler(server, &health_uri);
-    
+
     httpd_uri_t clients_uri = {
         .uri = "/api/clients",
         .method = HTTP_GET,
         .handler = clients_get_handler
     };
     httpd_register_uri_handler(server, &clients_uri);
-    
+
     httpd_uri_t client_uri = {
         .uri = "/api/client",
         .method = HTTP_GET,
         .handler = client_get_handler
     };
     httpd_register_uri_handler(server, &client_uri);
-    
+
     httpd_uri_t upload_uri = {
         .uri = "/api/upload",
         .method = HTTP_POST,
         .handler = upload_post_handler
     };
     httpd_register_uri_handler(server, &upload_uri);
-    
+
     httpd_uri_t data_uri = {
         .uri = "/api/data",
         .method = HTTP_GET,
         .handler = data_get_handler
     };
     httpd_register_uri_handler(server, &data_uri);
-    
+
     ESP_LOGI(TAG, "HTTP server started with 6 endpoints");
     return 0;
 }

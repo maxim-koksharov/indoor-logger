@@ -9,9 +9,44 @@ menu "Client Configuration"
 
     config CLIENT_DISPLAY_TIMEOUT_SEC
         int "Display auto-off timeout (seconds)"
-        default 10
+        default 0
         range 0 300
         help
             Time in seconds before the display turns off. Set to 0 for always-on.
+
+    config CLIENT_WIFI_SSID
+        string "Primary WiFi SSID"
+        default ""
+        help
+            Primary WiFi network SSID to connect to (same as server).
+            Must be the same network as the server is connected to.
+
+    config CLIENT_WIFI_PASS
+        string "Primary WiFi password"
+        default ""
+        help
+            Primary WiFi network password (same as server).
+
+    config CLIENT_BACKUP_SSID
+        string "Backup WiFi SSID"
+        default ""
+        help
+            Backup WiFi SSID. If the primary network is unreachable after
+            3 consecutive retries, the client will switch to this SSID.
+            Leave empty to disable backup.
+
+    config CLIENT_BACKUP_PASS
+        string "Backup WiFi password"
+        default ""
+        help
+            Backup WiFi network password.
+
+    config CLIENT_DISCOVER_TIMEOUT_MS
+        int "Server discovery timeout (ms)"
+        default 3000
+        range 500 10000
+        help
+            Timeout in milliseconds for UDP broadcast discovery.
+            Client broadcasts a discovery request and waits for server response.
 
 endmenu
