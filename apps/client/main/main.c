@@ -7,6 +7,7 @@
 #include "wifi_manager.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -15,6 +16,7 @@
 #include "nvs_flash.h"
 #include "esp_task_wdt.h"
 #include "esp_spiffs.h"
+#include "lwip/apps/sntp.h"
 
 static const char *TAG = "client";
 
@@ -24,7 +26,6 @@ static const char *TAG = "client";
 #define SENSOR_READ_INTERVAL_MS 300000
 #define WIFI_SYNC_INTERVAL_MS 300000
 #define DISPLAY_SWITCH_INTERVAL_MS 3000
-#define MAIN_LOOP_DELAY_MS 1000
 
 #ifndef CONFIG_CLIENT_ID
 #define CONFIG_CLIENT_ID "test_client"
@@ -62,6 +63,29 @@ static ens160_data_t last_ens_data = {0};
 
 static uint32_t client_uptime_sec = 0;
 static int display_screen = 0;
+static bool sntp_done = false;
+
+static void init_sntp(void) {
+    ESP_LOGI(TAG, "Initializing SNTP");
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
+    time_t now = 0;
+    struct tm timeinfo = {0};
+    int retry = 0;
+    while (timeinfo.tm_year < (2020 - 1900) && ++retry < 15) {
+        ESP_LOGI(TAG, "Waiting for SNTP sync (%d/15)", retry);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+    if (timeinfo.tm_year >= (2020 - 1900)) {
+        ESP_LOGI(TAG, "SNTP synced");
+        sntp_done = true;
+    } else {
+        ESP_LOGW(TAG, "SNTP sync failed, display will show --:--:--");
+    }
+}
 
 static void update_display(void) {
     display_clear_fb(&display);
@@ -71,20 +95,23 @@ static void update_display(void) {
 
     if (display_screen == 0) {
         char line1[16], line2[16];
-        snprintf(line1, sizeof(line1), "%d.%dC", t_int, t_dec);
-        uint32_t up = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS / 1000);
-        int h = up / 3600;
-        int m = (up % 3600) / 60;
-        int s = up % 60;
-        snprintf(line2, sizeof(line2), "%02d:%02d:%02d", h, m, s);
+        snprintf(line1, sizeof(line1), "%d.%dC %d%%", t_int, t_dec, (int)last_aht_data.humidity);
+        if (sntp_done) {
+            time_t now = time(NULL);
+            struct tm ti;
+            localtime_r(&now, &ti);
+            snprintf(line2, sizeof(line2), "%02d:%02d:%02d", ti.tm_hour, ti.tm_min, ti.tm_sec);
+        } else {
+            snprintf(line2, sizeof(line2), "--:--:--");
+        }
         int w1 = strlen(line1) * 12;
         int w2 = strlen(line2) * 12;
         display_draw_string_scaled(&display, display_font, (128 - w1) / 2, 0, line1, 2);
         display_draw_string_scaled(&display, display_font, (128 - w2) / 2, 17, line2, 2);
     } else {
         char line1[16], line2[16];
-        snprintf(line1, sizeof(line1), "%d%%RH %ue", (int)last_aht_data.humidity, last_ens_data.eco2);
-        snprintf(line2, sizeof(line2), "%uTV AQI%u", last_ens_data.tvoc, last_ens_data.aqi);
+        snprintf(line1, sizeof(line1), "CO2 %u", last_ens_data.eco2);
+        snprintf(line2, sizeof(line2), "VOC %u A%u", last_ens_data.tvoc, last_ens_data.aqi);
         display_draw_string_scaled(&display, display_font, 0, 0, line1, 2);
         display_draw_string_scaled(&display, display_font, 0, 17, line2, 2);
     }
@@ -93,10 +120,11 @@ static void update_display(void) {
 
 static void client_task(void *pvParameters) {
     TickType_t last_sensor_read = 0;
-    TickType_t last_wifi_sync = 0;
     TickType_t last_screen_switch = 0;
     int loop_count = 0;
     bool wifi_connected = false;
+    TickType_t now_init = xTaskGetTickCount();
+    TickType_t last_wifi_sync = now_init - pdMS_TO_TICKS(WIFI_SYNC_INTERVAL_MS - 10000);
     update_display();
 
     ESP_LOGI(TAG, "[TASK] Client task started (client_id=%s, display=%ds)",
@@ -178,6 +206,9 @@ static void client_task(void *pvParameters) {
                     if (wifi_sync_connect_to_server(CONFIG_CLIENT_WIFI_SSID, CONFIG_CLIENT_WIFI_PASS) == ESP_OK) {
                         wifi_connected = true;
                         ESP_LOGI(TAG, "[WIFI] Connected!");
+                        if (!sntp_done) {
+                            init_sntp();
+                        }
                     }
                 } else {
                     ESP_LOGW(TAG, "[WIFI] No SSID configured (CONFIG_CLIENT_WIFI_SSID)");
@@ -277,6 +308,7 @@ void app_main(void) {
                  spiffs_ret == ESP_OK ? "OK" : "FAIL", spiffs_total, spiffs_used);
         ESP_LOGI(TAG, "  Storage: %d records saved", storage_count);
         ESP_LOGI(TAG, "  Client ID: %s", CONFIG_CLIENT_ID);
+        ESP_LOGI(TAG, "  Time source: %s", sntp_done ? "NTP" : "none");
         ESP_LOGI(TAG, "  Heap at init: %d KB", (int)(esp_get_free_heap_size() / 1024));
         ESP_LOGI(TAG, "=== END SELF-TEST ===");
     }
