@@ -82,6 +82,32 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 
 `app_main()` in `apps/<app>/main/main.c` — **not** `user_init`.
 
+## Client sensor & sync intervals
+
+| Interval | Value | Description |
+|---|---|---|
+| Sensor read | 5 minutes (300000 ms) | Reads AHT21 + ENS160, stores record to SPIFFS |
+| WiFi sync | 5 minutes (300000 ms) | Uploads unsynced records to server |
+| Display switch | 3 seconds (3000 ms) | Toggles between screen 0 and screen 1 |
+
+## Client OLED display — dual-screen layout (128×32)
+
+Two screens cycle every 3 seconds. GLCD 5×7 font at 2× scale (12px/char, 14px tall).
+
+### Screen 0 — Temperature + Uptime
+```
+       27.5C         (centered)
+     01:23:45        (centered, HH:MM:SS uptime)
+```
+
+### Screen 1 — Humidity + Air Quality
+```
+46%RH 754e          (humidity, eCO2)
+252TV AQI3          (TVOC, Air Quality Index)
+```
+
+`update_display()` is called immediately on task start, then every 3 seconds on screen toggle, and on every sensor read (every 5 minutes after data refresh).
+
 ## Agent rules for the codebase and building
 
 If you need to verify your changes, use command "Flash". Flash device only with Flash command.
@@ -121,6 +147,18 @@ On ESP8266, calling `vTaskDelay()` directly in `app_main()`'s `while(1)` loop ca
 ### `esp_task_wdt_add(NULL)` does not exist in ESP-IDF v3.4
 
 ESP-IDF v3.4 for ESP8266 does not have `esp_task_wdt_add()`. Only `esp_task_wdt_init()` and `esp_task_wdt_reset()` / `esp_task_wdt_feed()` are available. Call `esp_task_wdt_reset()` in each loop iteration instead.
+
+### ENS160 upload JSON — conditional fields
+
+When `ENS160_ENABLE=1` (default), upload JSON includes eCO2/TVOC/AQI:
+```json
+{"readings":[{"ts":123,"up":456,"t":27.0,"h":46,"c":754,"v":252,"a":3}]}
+```
+When `ENS160_ENABLE=0`, the JSON omits `c`, `v`, `a` fields:
+```json
+{"readings":[{"ts":123,"up":456,"t":27.0,"h":46}]}
+```
+The server handles both formats (missing fields default to 0).
 
 ### `httpd_resp_send_err()` does not exist in ESP-IDF v3.4 HTTP server
 
