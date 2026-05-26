@@ -57,6 +57,16 @@ int data_store_append(const char *client_id, const data_record_t *rec);
 int data_store_read_range(const char *client_id, uint32_t offset, uint32_t limit,
                           data_record_t *out, uint32_t capacity);
 
+/** @brief Read records with timestamp >= since_ts (newest-first).
+ *  @param client_id Client identifier.
+ *  @param since_ts  Minimum Unix timestamp.
+ *  @param out       Output buffer.
+ *  @param capacity  Max records to return.
+ *  @return Number of records read, or 0.
+ */
+int data_store_read_since(const char *client_id, uint32_t since_ts,
+                          data_record_t *out, uint32_t capacity);
+
 /** @brief Get the total number of stored records for a client.
  *  @param client_id Client identifier.
  *  @return Record count, or 0 if the client has no file.

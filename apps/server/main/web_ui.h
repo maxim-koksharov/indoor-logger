@@ -27,14 +27,21 @@ tr:hover { background: #333; cursor: pointer; }
 .metric { background: #333; padding: 15px; border-radius: 6px; text-align: center; }
 .metric .label { font-size: 0.9em; color: #888; }
 .metric .value { font-size: 1.8em; font-weight: bold; margin-top: 5px; }
-canvas { width: 100%; height: 300px; background: #333; border-radius: 6px; display: block; }
-.aqi-1 { color: #4CAF50; }
-.aqi-2 { color: #FFC107; }
-.aqi-3 { color: #FF9800; }
-.aqi-4 { color: #f44336; }
-.aqi-5 { color: #9C27B0; }
+.controls { margin-bottom: 20px; }
+.controls button { background: #333; color: #e0e0e0; border: 1px solid #555; padding: 8px 16px; cursor: pointer; font-family: inherit; font-size: 0.9em; }
+.controls button.active { background: #4CAF50; color: #fff; border-color: #4CAF50; }
+.controls button:first-child { border-radius: 4px 0 0 4px; }
+.controls button:last-child { border-radius: 0 4px 4px 0; }
+.controls button:not(:last-child) { border-right: none; }
+.chart-box { margin-bottom: 20px; }
+.chart-box h3 { color: #4CAF50; margin-bottom: 8px; font-size: 0.95em; }
+canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; display: block; }
 .error-msg { color: #f44336; padding: 10px; }
 .loading { color: #888; }
+@media (max-width: 600px) {
+  body { padding: 10px; }
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+}
 </style>
 </head>
 <body>
@@ -48,10 +55,22 @@ canvas { width: 100%; height: 300px; background: #333; border-radius: 6px; displ
 <div class="card" id="detail">
 <h2 id="detail-title"></h2>
 <div class="metrics" id="metrics"><span class="loading">Select a client to view data</span></div>
-<canvas id="chart"></canvas>
+<div class="controls" id="controls">
+  <button onclick="setTimeRange(24)" class="active">24h</button>
+  <button onclick="setTimeRange(12)">12h</button>
+  <button onclick="setTimeRange(6)">6h</button>
+  <button onclick="setTimeRange(3)">3h</button>
+</div>
+<div class="chart-box"><h3>Temperature (&deg;C)</h3><canvas id="ch-temp"></canvas></div>
+<div class="chart-box"><h3>Humidity (%)</h3><canvas id="ch-hum"></canvas></div>
+<div class="chart-box"><h3>eCO2 (ppm)</h3><canvas id="ch-eco2"></canvas></div>
+<div class="chart-box"><h3>TVOC (ppb)</h3><canvas id="ch-tvoc"></canvas></div>
+<div class="chart-box"><h3>AQI</h3><canvas id="ch-aqi"></canvas></div>
 </div>
 <script>
-let currentClient = null;
+let currentData = null;
+let currentTimeRange = 24;
+let currentClientId = null;
 let lastError = '';
 let fetchCount = 0;
 
@@ -68,7 +87,7 @@ function setError(msg) {
 
 async function fetchJSON(url) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const timer = setTimeout(function() { controller.abort(); }, 8000);
   try {
     const r = await fetch(url, { signal: controller.signal });
     clearTimeout(timer);
@@ -126,17 +145,121 @@ async function fetchClients() {
   }
 }
 
+function setTimeRange(hours) {
+  currentTimeRange = hours;
+  var btns = document.querySelectorAll('#controls button');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].className = '';
+  }
+  var active = null;
+  for (var i = 0; i < btns.length; i++) {
+    if (parseInt(btns[i].textContent) === hours) {
+      btns[i].className = 'active';
+      break;
+    }
+  }
+  drawAllCharts();
+}
+
+function drawAllCharts() {
+  if (!currentData || currentData.length === 0) return;
+  var since = Math.floor(Date.now() / 1000) - currentTimeRange * 3600;
+  var filtered = currentData.filter(function(d) { return d.timestamp >= since; });
+  if (filtered.length < 2) {
+    var ids = ['ch-temp', 'ch-hum', 'ch-eco2', 'ch-tvoc', 'ch-aqi'];
+    ids.forEach(function(id) {
+      var canvas = document.getElementById(id);
+      var ctx = canvas.getContext('2d');
+      if (canvas.offsetWidth > 0) canvas.width = canvas.offsetWidth;
+      canvas.height = 180;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#888';
+      ctx.font = '14px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Insufficient data for selected range', canvas.width / 2, 95);
+    });
+    return;
+  }
+  drawChart('ch-temp', filtered, 'temp', 'Temperature', '°C', '#4CAF50');
+  drawChart('ch-hum', filtered, 'hum', 'Humidity', '%', '#2196F3');
+  drawChart('ch-eco2', filtered, 'eco2', 'eCO2', ' ppm', '#FFC107');
+  drawChart('ch-tvoc', filtered, 'tvoc', 'TVOC', ' ppb', '#FF9800');
+  drawChart('ch-aqi', filtered, 'aqi', 'AQI', '', '#9C27B0');
+}
+
+function drawChart(canvasId, data, key, label, unit, color) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  if (canvas.offsetWidth > 0) canvas.width = canvas.offsetWidth;
+  canvas.height = 180;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  var pad = 50;
+  var w = canvas.width - pad * 2;
+  var h = canvas.height - pad * 2;
+  if (w < 20 || h < 20) return;
+
+  var values = data.map(function(d) { return d[key]; });
+  var max = Math.max.apply(null, values);
+  var min = Math.min.apply(null, values);
+  if (min === max) { min = min - 1; max = max + 1; }
+  var range = max - min;
+
+  var since = Math.floor(Date.now() / 1000) - currentTimeRange * 3600;
+  var timeEnd = since + currentTimeRange * 3600;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var i = 0; i < data.length; i++) {
+    var x = pad + ((data[i].timestamp - since) / (currentTimeRange * 3600)) * w;
+    var y = pad + h - ((data[i][key] - min) / range) * h;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = '#888';
+  ctx.font = '12px monospace';
+  if (Number.isInteger(values[0])) {
+    ctx.fillText(max.toFixed(0) + unit, 5, pad + 12);
+    ctx.fillText(min.toFixed(0) + unit, 5, pad + h);
+  } else {
+    ctx.fillText(max.toFixed(1) + unit, 5, pad + 12);
+    ctx.fillText(min.toFixed(1) + unit, 5, pad + h);
+  }
+
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(pad, pad + h / 2);
+  ctx.lineTo(pad + w, pad + h / 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 async function showDetail(id) {
-  currentClient = id;
+  currentClientId = id;
   document.getElementById('detail').style.display = 'block';
   document.getElementById('metrics').innerHTML = '<span class="loading">Loading data...</span>';
+  currentData = null;
 
   try {
-    const d = await fetchJSON('/api/client?id=' + encodeURIComponent(id));
+    var since = Math.floor(Date.now() / 1000) - 24 * 3600;
+    var dataPromise = fetchJSON('/api/data?id=' + encodeURIComponent(id) + '&since=' + since);
+    var clientPromise = fetchJSON('/api/client?id=' + encodeURIComponent(id));
+
+    var results = await Promise.all([dataPromise, clientPromise]);
+    var data = results[0];
+    var d = results[1];
+
+    currentData = data;
     document.getElementById('detail-title').textContent = d.name || d.id;
-    const data = d.data || [];
-    const latest = data.length > 0 ? data[data.length - 1] : null;
-    const metrics = document.getElementById('metrics');
+
+    var latest = data.length > 0 ? data[data.length - 1] : null;
+    var metrics = document.getElementById('metrics');
 
     if (latest) {
       metrics.innerHTML =
@@ -145,55 +268,14 @@ async function showDetail(id) {
         '<div class="metric"><div class="label">eCO2</div><div class="value">' + latest.eco2 + ' ppm</div></div>' +
         '<div class="metric"><div class="label">TVOC</div><div class="value">' + latest.tvoc + ' ppb</div></div>' +
         '<div class="metric"><div class="label">AQI</div><div class="value aqi-' + latest.aqi + '">' + latest.aqi + '</div></div>';
-      drawChart(data);
     } else {
       metrics.innerHTML = '<span class="waiting">No data yet for ' + id + '</span>';
-      const canvas = document.getElementById('chart');
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
+
+    setTimeRange(currentTimeRange);
   } catch (e) {
-    document.getElementById('metrics').innerHTML = '<span class="error-msg">Failed to load data for ' + id + '</span>';
+    document.getElementById('metrics').innerHTML = '<span class="error-msg">Failed to load data for ' + id + ': ' + e.message + '</span>';
   }
-}
-
-function drawChart(data) {
-  const canvas = document.getElementById('chart');
-  const ctx = canvas.getContext('2d');
-  if (canvas.offsetWidth > 0) {
-    canvas.width = canvas.offsetWidth;
-  }
-  canvas.height = 300;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (data.length < 2) {
-    ctx.fillStyle = '#888';
-    ctx.font = '14px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Need at least 2 data points for chart', canvas.width / 2, 150);
-    return;
-  }
-  const pad = 40;
-  const w = canvas.width - pad * 2;
-  const h = canvas.height - pad * 2;
-  const maxTemp = Math.max.apply(null, data.map(function(d) { return d.temp; }));
-  const minTemp = Math.min.apply(null, data.map(function(d) { return d.temp; }));
-  const range = maxTemp - minTemp || 1;
-
-  ctx.strokeStyle = '#4CAF50';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  data.forEach(function(d, i) {
-    const x = pad + (i / (data.length - 1)) * w;
-    const y = pad + h - ((d.temp - minTemp) / range) * h;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  ctx.fillStyle = '#888';
-  ctx.font = '12px monospace';
-  ctx.fillText(maxTemp.toFixed(1) + '°C', 5, pad);
-  ctx.fillText(minTemp.toFixed(1) + '°C', 5, pad + h);
 }
 
 setInterval(function() { fetchStatus(); fetchClients(); }, 5000);

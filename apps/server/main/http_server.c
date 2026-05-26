@@ -309,7 +309,7 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
     }
 
     uint32_t offset = 0;
-    uint32_t limit = 100;
+    uint32_t limit = 500;
 
     if (query) {
         char tmp[16] = {0};
@@ -322,62 +322,63 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
         get_query_val(query, "limit", tmp, sizeof(tmp));
         if (tmp[0]) {
             int val = atoi(tmp);
-            limit = (val > 0) ? (uint32_t)val : 100;
+            limit = (val > 0) ? (uint32_t)val : 500;
         }
     }
-    if (limit > 200) limit = 200;
+    if (limit > 500) limit = 500;
 
     uint32_t available = data_store_get_count(client_id);
-    if (offset >= available || limit == 0) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "[]", 2);
-        return ESP_OK;
-    }
-    if (limit > available - offset) {
-        limit = available - offset;
-    }
-
     data_record_t *records = malloc(limit * sizeof(data_record_t));
     if (records == NULL) {
         ESP_LOGE(TAG, "data_get: OOM (%u records)", limit);
         httpd_resp_send_500(req);
         return ESP_OK;
     }
+    int read_count = 0;
 
-    int read_count = data_store_read_range(client_id, offset, limit, records, limit);
-
-    size_t bufsz = 256 + read_count * 128;
-    char *buf = malloc(bufsz);
-    if (!buf) {
-        free(records);
-        httpd_resp_send_500(req);
-        return ESP_OK;
+    if (query) {
+        char since_str[16] = {0};
+        get_query_val(query, "since", since_str, sizeof(since_str));
+        if (since_str[0]) {
+            uint32_t since_ts = (uint32_t)atol(since_str);
+            read_count = data_store_read_since(client_id, since_ts, records, limit);
+        }
     }
-    size_t pos = 0;
-    buf[pos++] = '[';
 
+    if (read_count == 0) {
+        if (offset >= available) {
+            free(records);
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "[]", 2);
+            return ESP_OK;
+        }
+        if (limit > available - offset) limit = available - offset;
+        read_count = data_store_read_range(client_id, offset, limit, records, limit);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send_chunk(req, "[", 1);
+
+    char chunk[256];
     for (int i = 0; i < read_count; i++) {
-        if (i > 0 && pos < bufsz) buf[pos++] = ',';
         char tbuf[16], hbuf[16];
         fmt_temp(tbuf, sizeof(tbuf), records[i].temp_x100);
         fmt_hum(hbuf, sizeof(hbuf), records[i].hum_x100);
-        int n = snprintf(buf + pos, bufsz - pos,
-            "{\"timestamp\":%lu,\"temp\":%s,\"hum\":%s,"
+        int n = snprintf(chunk, sizeof(chunk),
+            "%s{\"timestamp\":%lu,\"temp\":%s,\"hum\":%s,"
             "\"eco2\":%u,\"tvoc\":%u,\"aqi\":%u}",
+            i > 0 ? "," : "",
             (unsigned long)records[i].timestamp,
             tbuf, hbuf, records[i].eco2, records[i].tvoc, records[i].aqi);
-        if (n > 0) pos += n;
-        if (pos >= bufsz - 128) break;
+        if (n > 0) {
+            httpd_resp_send_chunk(req, chunk, n);
+        }
     }
 
-    if (pos < bufsz) buf[pos++] = ']';
-    buf[pos] = '\0';
+    httpd_resp_send_chunk(req, "]", 1);
+    httpd_resp_send_chunk(req, NULL, 0);
 
     free(records);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, buf, pos);
-    free(buf);
     return ESP_OK;
 }
 

@@ -153,6 +153,29 @@ int data_store_read_range(const char *client_id, uint32_t offset, uint32_t limit
     return read_count;
 }
 
+int data_store_read_since(const char *client_id, uint32_t since_ts,
+                          data_record_t *out, uint32_t capacity) {
+    uint32_t count = data_store_get_count(client_id);
+    if (count == 0 || capacity == 0) return 0;
+
+    uint32_t lo = 0, hi = count;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        data_record_t rec;
+        if (data_store_read_range(client_id, mid, 1, &rec, 1) != 1) break;
+        if (rec.timestamp < since_ts) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if (lo >= count) return 0;
+    uint32_t available = count - lo;
+    if (available > capacity) available = capacity;
+    return data_store_read_range(client_id, lo, available, out, capacity);
+}
+
 uint32_t data_store_get_count(const char *client_id) {
     char filepath[64];
     get_filepath(client_id, filepath, sizeof(filepath));
