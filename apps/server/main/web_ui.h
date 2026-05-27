@@ -38,6 +38,10 @@ tr:hover { background: #333; cursor: pointer; }
 canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; display: block; }
 .error-msg { color: #f44336; padding: 10px; }
 .loading { color: #888; }
+.name-edit { background: #333; color: #e0e0e0; border: 1px solid #4CAF50; padding: 4px 8px; font-family: inherit; font-size: 1em; width: 200px; border-radius: 4px; }
+.name-edit:focus { outline: none; border-color: #4CAF50; }
+.name-display { cursor: pointer; }
+.name-display:hover { color: #4CAF50; }
 @media (max-width: 600px) {
   body { padding: 10px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
@@ -49,7 +53,7 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 <div class="status" id="status"><span class="loading">Connecting...</span></div>
 <div id="error-bar"></div>
 <table id="clients">
-<thead><tr><th>ID</th><th>Status</th><th>Records</th><th>Last Seen</th><th>IP</th></tr></thead>
+<thead><tr><th>Name</th><th>ID</th><th>Status</th><th>Records</th><th>Last Seen</th><th>IP</th></tr></thead>
 <tbody></tbody>
 </table>
 <div class="card" id="detail">
@@ -73,6 +77,39 @@ let currentTimeRange = 24;
 let currentClientId = null;
 let lastError = '';
 let fetchCount = 0;
+
+function editName() {
+  var display = document.getElementById('name-display');
+  var editor = document.getElementById('name-editor');
+  display.style.display = 'none';
+  editor.style.display = 'inline';
+  editor.innerHTML = '<input type="text" id="name-input" class="name-edit" value="' + display.textContent.trim() + '" onblur="saveName()" onkeydown="if(event.key==\'Enter\')saveName();if(event.key==\'Escape\')cancelName()">';
+  document.getElementById('name-input').focus();
+  document.getElementById('name-input').select();
+}
+
+async function saveName() {
+  var input = document.getElementById('name-input');
+  if (!input) return;
+  var name = input.value.trim();
+  var editor = document.getElementById('name-editor');
+  var display = document.getElementById('name-display');
+  if (name && name !== display.textContent.trim()) {
+    try {
+      var r = await fetchJSON('/api/client/name?id=' + encodeURIComponent(currentClientId) + '&name=' + encodeURIComponent(name));
+      display.innerHTML = (r.name || r.id) + ' &nbsp;&#9998;';
+    } catch (e) {
+      setError('Failed to rename: ' + e.message);
+    }
+  }
+  editor.style.display = 'none';
+  display.style.display = 'inline';
+}
+
+function cancelName() {
+  document.getElementById('name-editor').style.display = 'none';
+  document.getElementById('name-display').style.display = 'inline';
+}
 
 function setError(msg) {
   const bar = document.getElementById('error-bar');
@@ -123,7 +160,7 @@ async function fetchClients() {
     const tbody = document.querySelector('#clients tbody');
     tbody.innerHTML = '';
     if (clients.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5"><span class="waiting">Waiting for client data...</span></td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6"><span class="waiting">Waiting for client data...</span></td></tr>';
       return;
     }
     clients.forEach(function(c) {
@@ -133,7 +170,8 @@ async function fetchClients() {
       var statusClass = c.online ? 'online' : 'offline';
       var statusText = c.online ? 'ONLINE' : 'OFFLINE';
       tr.innerHTML =
-        '<td>' + c.id + '</td>' +
+        '<td>' + (c.name || c.id) + '</td>' +
+        '<td style="color:#888;font-size:0.85em">' + (c.name ? c.id : '') + '</td>' +
         '<td class="' + statusClass + '">' + statusText + '</td>' +
         '<td>' + c.records + '</td>' +
         '<td>' + (isNaN(dt.getTime()) ? 'N/A' : dt.toLocaleTimeString()) + '</td>' +
@@ -143,22 +181,6 @@ async function fetchClients() {
   } catch (e) {
     setError('Cannot fetch clients: ' + e.message);
   }
-}
-
-function setTimeRange(hours) {
-  currentTimeRange = hours;
-  var btns = document.querySelectorAll('#controls button');
-  for (var i = 0; i < btns.length; i++) {
-    btns[i].className = '';
-  }
-  var active = null;
-  for (var i = 0; i < btns.length; i++) {
-    if (parseInt(btns[i].textContent) === hours) {
-      btns[i].className = 'active';
-      break;
-    }
-  }
-  drawAllCharts();
 }
 
 function drawAllCharts() {
@@ -240,6 +262,16 @@ function drawChart(canvasId, data, key, label, unit, color) {
   ctx.setLineDash([]);
 }
 
+async function fetchData(id, rangeHours) {
+  var since = Math.floor(Date.now() / 1000) - rangeHours * 3600;
+  if (rangeHours >= 12) {
+    var bucket = 300;
+    if (rangeHours >= 24) { bucket = 900; }
+    return await fetchJSON('/api/data/aggregated?id=' + encodeURIComponent(id) + '&since=' + since + '&bucket=' + bucket);
+  }
+  return await fetchJSON('/api/data?id=' + encodeURIComponent(id) + '&since=' + since);
+}
+
 async function showDetail(id) {
   currentClientId = id;
   document.getElementById('detail').style.display = 'block';
@@ -247,18 +279,13 @@ async function showDetail(id) {
   currentData = null;
 
   try {
-    var since = Math.floor(Date.now() / 1000) - 24 * 3600;
-    var dataPromise = fetchJSON('/api/data?id=' + encodeURIComponent(id) + '&since=' + since);
+    currentData = await fetchData(id, currentTimeRange);
     var clientPromise = fetchJSON('/api/client?id=' + encodeURIComponent(id));
+    var d = await clientPromise;
 
-    var results = await Promise.all([dataPromise, clientPromise]);
-    var data = results[0];
-    var d = results[1];
+    document.getElementById('detail-title').innerHTML = '<span class="name-display" id="name-display" onclick="editName()">' + (d.name || d.id) + ' &nbsp;&#9998;</span><span id="name-editor" style="display:none"></span>';
 
-    currentData = data;
-    document.getElementById('detail-title').textContent = d.name || d.id;
-
-    var latest = data.length > 0 ? data[data.length - 1] : null;
+    var latest = currentData.length > 0 ? currentData[currentData.length - 1] : null;
     var metrics = document.getElementById('metrics');
 
     if (latest) {
@@ -272,9 +299,31 @@ async function showDetail(id) {
       metrics.innerHTML = '<span class="waiting">No data yet for ' + id + '</span>';
     }
 
-    setTimeRange(currentTimeRange);
+    drawAllCharts();
   } catch (e) {
     document.getElementById('metrics').innerHTML = '<span class="error-msg">Failed to load data for ' + id + ': ' + e.message + '</span>';
+  }
+}
+
+async function setTimeRange(hours) {
+  currentTimeRange = hours;
+  var btns = document.querySelectorAll('#controls button');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].className = '';
+  }
+  for (var i = 0; i < btns.length; i++) {
+    if (parseInt(btns[i].textContent) === hours) {
+      btns[i].className = 'active';
+      break;
+    }
+  }
+  if (currentClientId) {
+    try {
+      currentData = await fetchData(currentClientId, hours);
+      drawAllCharts();
+    } catch (e) {
+      setError('Failed to load data: ' + e.message);
+    }
   }
 }
 

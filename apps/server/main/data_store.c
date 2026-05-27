@@ -1,6 +1,7 @@
 #include "data_store.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
 #include <esp_log.h>
@@ -211,4 +212,62 @@ int data_store_delete_client(const char *client_id) {
 
     ESP_LOGI(TAG, "Deleted client data: %s", client_id);
     return 0;
+}
+
+int data_store_read_aggregated(const char *client_id, uint32_t since_ts, uint32_t bucket_sec,
+                               data_aggregated_t *out, uint32_t capacity) {
+    if (capacity == 0 || bucket_sec == 0) return 0;
+
+    uint32_t max_raw = 2000;
+    data_record_t *raw = malloc(max_raw * sizeof(data_record_t));
+    if (!raw) {
+        ESP_LOGE(TAG, "OOM reading raw records for aggregation");
+        return 0;
+    }
+
+    int raw_count = data_store_read_since(client_id, since_ts, raw, max_raw);
+    if (raw_count <= 0) {
+        free(raw);
+        return 0;
+    }
+
+    int bucket_count = 0;
+    int i = 0;
+    while (i < raw_count && bucket_count < (int)capacity) {
+        uint32_t bucket_ts = (raw[i].timestamp / bucket_sec) * bucket_sec;
+
+        int64_t sum_temp = 0;
+        int64_t sum_hum = 0;
+        uint32_t sum_eco2 = 0;
+        uint32_t sum_tvoc = 0;
+        uint32_t sum_aqi = 0;
+        uint32_t cnt = 0;
+
+        while (i < raw_count) {
+            uint32_t ts = (raw[i].timestamp / bucket_sec) * bucket_sec;
+            if (ts != bucket_ts) break;
+
+            sum_temp += raw[i].temp_x100;
+            sum_hum += raw[i].hum_x100;
+            sum_eco2 += raw[i].eco2;
+            sum_tvoc += raw[i].tvoc;
+            sum_aqi += raw[i].aqi;
+            cnt++;
+            i++;
+        }
+
+        if (cnt > 0) {
+            out[bucket_count].timestamp = bucket_ts;
+            out[bucket_count].count = (uint16_t)cnt;
+            out[bucket_count].temp_avg_x100 = (int16_t)(sum_temp / (int64_t)cnt);
+            out[bucket_count].hum_avg_x100 = (uint16_t)(sum_hum / (int64_t)cnt);
+            out[bucket_count].eco2_avg = (uint16_t)(sum_eco2 / cnt);
+            out[bucket_count].tvoc_avg = (uint16_t)(sum_tvoc / cnt);
+            out[bucket_count].aqi_avg = (uint8_t)(sum_aqi / cnt);
+            bucket_count++;
+        }
+    }
+
+    free(raw);
+    return bucket_count;
 }

@@ -15,6 +15,22 @@ static httpd_handle_t server = NULL;
 
 extern uint32_t server_get_timestamp(void);
 
+static void url_decode(char *dst, const char *src) {
+    while (*src) {
+        if (*src == '%' && src[1] && src[2]) {
+            int hi = src[1] >= 'a' ? src[1] - 'a' + 10 : (src[1] >= 'A' ? src[1] - 'A' + 10 : src[1] - '0');
+            int lo = src[2] >= 'a' ? src[2] - 'a' + 10 : (src[2] >= 'A' ? src[2] - 'A' + 10 : src[2] - '0');
+            *dst++ = (char)((hi << 4) | lo);
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' '; src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
 static const char *get_query_val(const char *query, const char *key, char *out, size_t out_sz) {
     if (!query || !*query) return NULL;
     const char *k = strstr(query, key);
@@ -27,6 +43,7 @@ static const char *get_query_val(const char *query, const char *key, char *out, 
     if (len >= out_sz) len = out_sz - 1;
     memcpy(out, k, len);
     out[len] = '\0';
+    url_decode(out, out);
     return out;
 }
 
@@ -382,6 +399,91 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t client_name_get_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    char name[CLIENT_REGISTRY_NAME_LEN] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    get_query_val(query, "name", name, sizeof(name));
+
+    if (client_id[0] == '\0' || name[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing id or name", 18);
+        return ESP_OK;
+    }
+
+    client_registry_update(client_id, name, NULL);
+    client_registry_save();
+    ESP_LOGI(TAG, "Client %s renamed to: %s", client_id, name);
+
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "{\"id\":\"%s\",\"name\":\"%s\"}", client_id, name);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t data_aggregated_get_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    if (client_id[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing id", 10);
+        return ESP_OK;
+    }
+
+    uint32_t since_ts = 0;
+    uint32_t bucket_sec = 300;
+    if (query) {
+        char tmp[16] = {0};
+        get_query_val(query, "since", tmp, sizeof(tmp));
+        if (tmp[0]) since_ts = (uint32_t)atol(tmp);
+        tmp[0] = '\0';
+        get_query_val(query, "bucket", tmp, sizeof(tmp));
+        if (tmp[0]) {
+            int val = atoi(tmp);
+            if (val > 0) bucket_sec = (uint32_t)val;
+        }
+    }
+
+    uint32_t capacity = 480;
+    data_aggregated_t *buckets = malloc(capacity * sizeof(data_aggregated_t));
+    if (!buckets) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+
+    int count = data_store_read_aggregated(client_id, since_ts, bucket_sec, buckets, capacity);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send_chunk(req, "[", 1);
+
+    char chunk[256];
+    for (int i = 0; i < count; i++) {
+        char tbuf[16], hbuf[16];
+        fmt_temp(tbuf, sizeof(tbuf), buckets[i].temp_avg_x100);
+        fmt_hum(hbuf, sizeof(hbuf), buckets[i].hum_avg_x100);
+        int n = snprintf(chunk, sizeof(chunk),
+            "%s{\"ts\":%lu,\"c\":%u,\"temp\":%s,\"hum\":%s,"
+            "\"eco2\":%u,\"tvoc\":%u,\"aqi\":%u}",
+            i > 0 ? "," : "",
+            (unsigned long)buckets[i].timestamp,
+            buckets[i].count,
+            tbuf, hbuf,
+            buckets[i].eco2_avg, buckets[i].tvoc_avg, buckets[i].aqi_avg);
+        if (n > 0) {
+            httpd_resp_send_chunk(req, chunk, n);
+        }
+    }
+
+    httpd_resp_send_chunk(req, "]", 1);
+    httpd_resp_send_chunk(req, NULL, 0);
+
+    free(buckets);
+    return ESP_OK;
+}
+
 int http_server_init(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
@@ -441,6 +543,20 @@ int http_server_start(void) {
     };
     httpd_register_uri_handler(server, &data_uri);
 
-    ESP_LOGI(TAG, "HTTP server started with 6 endpoints");
+    httpd_uri_t agg_uri = {
+        .uri = "/api/data/aggregated",
+        .method = HTTP_GET,
+        .handler = data_aggregated_get_handler
+    };
+    httpd_register_uri_handler(server, &agg_uri);
+
+    httpd_uri_t name_uri = {
+        .uri = "/api/client/name",
+        .method = HTTP_GET,
+        .handler = client_name_get_handler
+    };
+    httpd_register_uri_handler(server, &name_uri);
+
+    ESP_LOGI(TAG, "HTTP server started with 8 endpoints");
     return 0;
 }

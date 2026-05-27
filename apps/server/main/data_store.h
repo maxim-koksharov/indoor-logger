@@ -79,6 +79,28 @@ uint32_t data_store_get_count(const char *client_id);
  */
 int data_store_delete_client(const char *client_id);
 
+/** @brief A single aggregated data bucket (result of grouping raw records by time). */
+typedef struct {
+    uint32_t timestamp;  /**< Bucket start timestamp (Unix seconds) */
+    uint16_t count;      /**< Number of raw records in this bucket */
+    int16_t  temp_avg_x100;
+    uint16_t hum_avg_x100;
+    uint16_t eco2_avg;
+    uint16_t tvoc_avg;
+    uint8_t  aqi_avg;
+} data_aggregated_t;
+
+/** @brief Read aggregated (averaged) records grouped into time buckets.
+ *  @param client_id  Client identifier.
+ *  @param since_ts   Minimum Unix timestamp.
+ *  @param bucket_sec Bucket size in seconds (e.g. 300 for 5 min).
+ *  @param out        Output buffer for aggregated records.
+ *  @param capacity   Max buckets to return.
+ *  @return Number of buckets returned, or 0.
+ */
+int data_store_read_aggregated(const char *client_id, uint32_t since_ts, uint32_t bucket_sec,
+                               data_aggregated_t *out, uint32_t capacity);
+
 #ifdef __cplusplus
 }
 #endif
