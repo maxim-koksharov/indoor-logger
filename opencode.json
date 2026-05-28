@@ -6,6 +6,8 @@
 	],
 	"permission": {
 		"": "ask",
+		"grep": "allow",
+		"todowrite": "allow",
 		"read": {
 			"": "allow",
 			"/esp/ESP8266_RTOS_SDK/**": "allow",
@@ -37,7 +39,7 @@
 		},
 		"bash": {
 			"*": "ask",
-			"grep *": "allow",
+			"grep": "allow",
 			"head *": "allow",
 			"tail *": "allow",
 			"mkdir *": "allow",
