@@ -2,10 +2,13 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_log.h"
 #include "esp_err.h"
 #include "driver/i2c.h"
 
-void display_init(Display *d, int sda_pin, int scl_pin, uint8_t addr)
+static const char *TAG = "display";
+
+int display_init(Display *d, int sda_pin, int scl_pin, uint8_t addr)
 {
     d->sda_pin = sda_pin;
     d->scl_pin = scl_pin;
@@ -17,7 +20,7 @@ void display_init(Display *d, int sda_pin, int scl_pin, uint8_t addr)
     conf.scl_io_num = (gpio_num_t)scl_pin;
     conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
     conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.clk_stretch_tick = 300;
+    conf.clk_stretch_tick = 2000;
     ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, conf.mode));
     ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
 
@@ -27,9 +30,31 @@ void display_init(Display *d, int sda_pin, int scl_pin, uint8_t addr)
     d->dev.width = 128;
     d->dev.height = 32;
 
-    ssd1306_init(&d->dev);
+    // Probe the display to sync the I2C bus after driver setup
+    {
+        i2c_cmd_handle_t probe = i2c_cmd_link_create();
+        i2c_master_start(probe);
+        i2c_master_write_byte(probe, (addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_stop(probe);
+        i2c_master_cmd_begin(I2C_NUM_0, probe, 100 / portTICK_PERIOD_MS);
+        i2c_cmd_link_delete(probe);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    int ret = ssd1306_init(&d->dev);
+    if (ret != 0) {
+        ESP_LOGW(TAG, "ssd1306_init failed: %d, retrying...", ret);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        ret = ssd1306_init(&d->dev);
+    }
+    if (ret != 0) {
+        ESP_LOGE(TAG, "ssd1306_init failed after retry: %d", ret);
+        return -1;
+    }
     ssd1306_set_whole_display_lighting(&d->dev, false);
     memset(d->fb, 0x00, sizeof(d->fb));
+    return 0;
 }
 
 void display_on(Display *d)

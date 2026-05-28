@@ -17,7 +17,7 @@ typedef struct {
     uint8_t addr;
 } Display;
 
-void display_init(Display *d, int sda_pin, int scl_pin, uint8_t addr);
+int display_init(Display *d, int sda_pin, int scl_pin, uint8_t addr);
 void display_on(Display *d);
 void display_off(Display *d);
 void display_clear_fb(Display *d);

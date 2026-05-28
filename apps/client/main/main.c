@@ -12,10 +12,12 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_wifi.h"
 #include "driver/i2c.h"
 #include "nvs_flash.h"
 #include "esp_task_wdt.h"
 #include "esp_spiffs.h"
+#include "esp_sleep.h"
 #include "lwip/apps/sntp.h"
 
 static const char *TAG = "client";
@@ -25,7 +27,8 @@ static const char *TAG = "client";
 
 #define SENSOR_READ_INTERVAL_MS 300000
 #define WIFI_SYNC_INTERVAL_MS 300000
-#define DISPLAY_SWITCH_INTERVAL_MS 3000
+#define DISPLAY_ON_MS 6000
+#define DISPLAY_SCREEN_INTERVAL_MS 3000
 
 #ifndef CONFIG_CLIENT_ID
 #define CONFIG_CLIENT_ID "test_client"
@@ -120,27 +123,43 @@ static void update_display(void) {
 
 static void client_task(void *pvParameters) {
     TickType_t last_sensor_read = 0;
-    TickType_t last_screen_switch = 0;
-    int loop_count = 0;
-    bool wifi_connected = false;
     TickType_t now_init = xTaskGetTickCount();
-    TickType_t last_wifi_sync = now_init - pdMS_TO_TICKS(WIFI_SYNC_INTERVAL_MS - 10000);
-    update_display();
-
-    ESP_LOGI(TAG, "[TASK] Client task started (client_id=%s, display=%ds)",
-             CONFIG_CLIENT_ID, CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC);
-
+    last_sensor_read = now_init;
+    
+    bool wifi_initialized = false;
+    bool display_active = false;
+    TickType_t display_on_until = 0;
+    TickType_t last_screen_switch = 0;
+    int display_screen = 0;
+    
+    display_off(&display);
+    
+    ESP_LOGI(TAG, "[TASK] Client task started (client_id=%s)", CONFIG_CLIENT_ID);
+    
     while (1) {
         TickType_t now = xTaskGetTickCount();
-        loop_count++;
         esp_task_wdt_reset();
-
+        
+        bool button_pressed = button_is_pressed();
+        
+        if (display_active) {
+            if (now >= display_on_until) {
+                display_active = false;
+                display_off(&display);
+                ESP_LOGI(TAG, "[DISPLAY] Timeout, OFF");
+            } else if ((now - last_screen_switch) >= pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS)) {
+                display_screen = !display_screen;
+                update_display();
+                last_screen_switch = now;
+            }
+        }
+        
         if ((now - last_sensor_read) >= pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS)) {
             ESP_LOGI(TAG, "[SENSORS] Reading...");
-
+            
             aht21_data_t aht_data = {0};
             ens160_data_t ens_data = {0};
-
+            
             int aht_ret = aht21_read(I2C_NUM_0, &aht_data);
             if (aht_ret == 0) {
                 last_aht_data = aht_data;
@@ -151,7 +170,7 @@ static void client_task(void *pvParameters) {
             } else {
                 ESP_LOGW(TAG, "[SENSORS] AHT21 failed: %d", aht_ret);
             }
-
+            
 #if ENS160_ENABLE
             int ens_ret = ens160_read(I2C_NUM_0, &ens_data);
             if (ens_ret == 0) {
@@ -160,16 +179,15 @@ static void client_task(void *pvParameters) {
             } else {
                 ESP_LOGW(TAG, "[SENSORS] ENS160 failed: %d", ens_ret);
             }
-
+            
             ens160_set_env(I2C_NUM_0, last_aht_data.temperature, last_aht_data.humidity);
 #else
             (void)ens_data;
             ESP_LOGI(TAG, "[SENSORS] ENS160 disabled");
 #endif
-
+            
             client_uptime_sec = (uint32_t)(now * portTICK_PERIOD_MS / 1000);
-
-            // Save record
+            
             client_record_t record = {
                 .timestamp = client_uptime_sec,
                 .uptime_sec = client_uptime_sec,
@@ -180,32 +198,23 @@ static void client_task(void *pvParameters) {
                 .aqi = last_ens_data.aqi,
                 .synced = false
             };
-
+            
             if (data_storage_append(&record) == 0) {
                 ESP_LOGI(TAG, "[STORAGE] Saved, total=%d", data_storage_get_count());
             } else {
                 ESP_LOGW(TAG, "[STORAGE] Append failed, SPIFFS may be full");
             }
-
+            
             update_display();
             last_sensor_read = now;
-        }
-
-        if ((now - last_screen_switch) >= pdMS_TO_TICKS(DISPLAY_SWITCH_INTERVAL_MS)) {
-            display_screen = !display_screen;
-            update_display();
-            last_screen_switch = now;
-        }
-
-        // WiFi sync every 5 minutes
-        if ((now - last_wifi_sync) >= pdMS_TO_TICKS(WIFI_SYNC_INTERVAL_MS)) {
-            if (!wifi_connected || !wifi_sync_is_connected()) {
-                wifi_connected = false;
+            
+            if (!wifi_initialized) {
                 ESP_LOGI(TAG, "[WIFI] Connecting...");
                 if (strlen(CONFIG_CLIENT_WIFI_SSID) > 0) {
                     if (wifi_sync_connect_to_server(CONFIG_CLIENT_WIFI_SSID, CONFIG_CLIENT_WIFI_PASS) == ESP_OK) {
-                        wifi_connected = true;
-                        ESP_LOGI(TAG, "[WIFI] Connected!");
+                        wifi_initialized = true;
+                        esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+                        ESP_LOGI(TAG, "[WIFI] Connected! Modem-sleep enabled");
                         if (!sntp_done) {
                             init_sntp();
                         }
@@ -214,29 +223,92 @@ static void client_task(void *pvParameters) {
                     ESP_LOGW(TAG, "[WIFI] No SSID configured (CONFIG_CLIENT_WIFI_SSID)");
                 }
             }
-
-            if (wifi_connected) {
+            
+            if (wifi_initialized) {
                 ESP_LOGI(TAG, "[WIFI] Uploading...");
                 if (wifi_sync_upload_unsynced() == ESP_OK) {
                     ESP_LOGI(TAG, "[WIFI] Upload OK");
                 } else {
-                    wifi_connected = false;
+                    ESP_LOGW(TAG, "[WIFI] Upload failed");
                 }
             }
-
-            last_wifi_sync = now;
-        }
-
-        if (loop_count % 30 == 0) {
-            ESP_LOGI(TAG, "[LOOP] Heartbeat: %d, heap=%uK", loop_count, (unsigned int)(esp_get_free_heap_size() / 1024));
         }
         
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (button_pressed && !display_active) {
+            display_active = true;
+            display_on_until = now + pdMS_TO_TICKS(DISPLAY_ON_MS);
+            display_screen = 0;
+            last_screen_switch = now;
+            display_on(&display);
+            update_display();
+            ESP_LOGI(TAG, "[BUTTON] Pressed, display ON for %dms", DISPLAY_ON_MS);
+        }
+        
+        TickType_t time_to_sensor_ticks = pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS) - (now - last_sensor_read);
+        TickType_t sleep_ticks = time_to_sensor_ticks;
+        
+        if (display_active) {
+            TickType_t display_remaining = display_on_until - now;
+            if (display_remaining < sleep_ticks) {
+                sleep_ticks = display_remaining;
+            }
+        }
+        
+        if (button_pressed) {
+            sleep_ticks = pdMS_TO_TICKS(100);
+        }
+        
+        if (sleep_ticks > pdMS_TO_TICKS(10)) {
+            if (wifi_initialized) {
+                ESP_LOGI(TAG, "[WIFI] Stopping for light sleep");
+                esp_err_t stop_ret = esp_wifi_stop();
+                if (stop_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "[WIFI] esp_wifi_stop() failed: %d", stop_ret);
+                }
+            }
+            
+            button_enable_wakeup();
+            
+            uint32_t sleep_ms = sleep_ticks * portTICK_PERIOD_MS;
+            uint64_t sleep_us = ((uint64_t)sleep_ms) * 1000;
+            ESP_LOGI(TAG, "[SLEEP] Light sleep for %u ms (button wake enabled)", sleep_ms);
+            
+            esp_sleep_enable_timer_wakeup(sleep_us);
+            esp_light_sleep_start();
+            
+            button_disable_wakeup();
+            
+            if (wifi_initialized && button_is_pressed()) {
+                ESP_LOGI(TAG, "[WAKE] GPIO (button)");
+            } else if (wifi_initialized) {
+                ESP_LOGI(TAG, "[WAKE] Timer");
+                ESP_LOGI(TAG, "[WIFI] Restarting after timer wake");
+                esp_err_t start_ret = esp_wifi_start();
+                if (start_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "[WIFI] esp_wifi_start() failed: %d", start_ret);
+                }
+                
+                int retry = 0;
+                while (!wifi_manager_is_connected() && retry < 30) {
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    retry++;
+                }
+                
+                if (wifi_manager_is_connected()) {
+                    ESP_LOGI(TAG, "[WIFI] Reconnected");
+                } else {
+                    ESP_LOGW(TAG, "[WIFI] Reconnect timeout");
+                }
+            }
+        }
     }
 }
 
 void app_main(void) {
     ESP_LOGI(TAG, "Client starting...");
+
+    esp_set_cpu_freq(ESP_CPU_FREQ_80M);
+    ESP_LOGI(TAG, "CPU frequency set to 80 MHz");
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -246,7 +318,10 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
 
-    display_init(&display, SDA_PIN, SCL_PIN, SSD1306_I2C_ADDR_0);
+    int disp_ret = display_init(&display, SDA_PIN, SCL_PIN, SSD1306_I2C_ADDR_0);
+    if (disp_ret != 0) {
+        ESP_LOGE(TAG, "Display init FAILED");
+    }
 
 #if ENS160_ENABLE
     int ens_init_ret = ens160_init(I2C_NUM_0);
@@ -297,7 +372,7 @@ void app_main(void) {
         ESP_LOGI(TAG, "=== SELF-TEST ===");
         ESP_LOGI(TAG, "  NVS: OK");
         ESP_LOGI(TAG, "  I2C: init OK (SDA=GPIO4 SCL=GPIO5)");
-        ESP_LOGI(TAG, "  Display: initialized");
+        ESP_LOGI(TAG, "  Display: %s", (disp_ret == 0) ? "OK" : "FAILED");
 #if ENS160_ENABLE
         ESP_LOGI(TAG, "  ENS160: %s", (ens_init_ret == 0) ? "detected" : "not detected or warming");
 #else
