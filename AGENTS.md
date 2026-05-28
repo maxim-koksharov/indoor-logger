@@ -89,15 +89,86 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 | Sensor read | 5 minutes (300000 ms) | Reads AHT21 + ENS160, stores record to SPIFFS |
 | WiFi sync | 5 minutes (300000 ms) | Uploads unsynced records to server |
 | Display switch | 3 seconds (3000 ms) | Toggles between screen 0 and screen 1 |
+| Sleep cycle | 100 ms - 5 min | `esp_light_sleep_start()` — blocks until timer or GPIO wake |
+
+## Client power saving modes
+
+The client supports the following sleep modes, ordered by power consumption (lowest first):
+
+| Mode | Current | Wake sources | Wake time | WiFi required? | Button wake? | Notes |
+|---|---|---|---|---|---|---|
+| **Deep sleep** | **~20 µA** | RTC timer only | ~30 ms (full boot) | Must stop first | No (RST mod only) | Lowest power. Full boot from scratch. No GPIO wake-up in ESP-IDF v3.4. |
+| **Deep sleep + RST** | **~20 µA** | Timer + RST pin | ~30 ms (full boot) | Must stop first | Yes (button → RST) | Button to RST via transistor. Full reset on press. |
+| **Light sleep** | **~0.7–3 mA** | Timer (RTC) + GPIO (level) | ~2.7 ms | Must stop first | Yes (any GPIO) | RAM retained, CPU paused. GPIO must be level-triggered (LOW/HIGH), not edge. |
+| **Modem sleep** | **~12–15 mA** | WiFi beacon (DTIM) | ~1–3 ms (RF PLL) | Must be connected | N/A | CPU runs, RF off between beacons. |
+| **Active (no sleep)** | **~50 mA** | N/A | N/A | Always on | N/A | RF + CPU always on. **CPU at 80 MHz** (reduced from 160 MHz for power saving). |
+
+### Wake-up times in detail
+
+| Source | Mode | Time | Notes |
+|---|---|---|---|
+| GPIO interrupt (NEGEDGE) | Active / Modem sleep | **Instant** (<1 ms) | ISR → `vTaskNotifyGiveFromISR` → task resumes |
+| GPIO level (LOW/HIGH) | Light sleep | **~2.7 ms** | RTC wake-up, PLL relock, crystal stabilize. **Current mode.** |
+| RTC timer | Light sleep | **~2.7 ms** | Same path as GPIO wake-up |
+| RTC timer | Deep sleep | **~30–35 ms** | Full ROM boot, flash init, `app_main()` |
+| RST pin | Deep sleep | **~30–35 ms** | Same as power-on reset |
+| WiFi reconnect | Any (after stop) | **~2–5 s** | DHCP + 4-way handshake; only needed after WiFi stop/start |
+
+### Current architecture (light sleep)
+
+The client uses light sleep mode with WiFi stop/start cycles. This provides ~0.7-3 mA power consumption with both timer and button wake-up support.
+
+```
+[Boot] → WiFi connect → sensor read + upload → WiFi stop → light sleep
+[Timer wake] → WiFi start → sensor read + upload → WiFi stop → light sleep
+[Button wake] → display ON 6s → light sleep (no WiFi)
+```
+
+**Key implementation details:**
+- `button_enable_wakeup()` configures GPIO12 with `GPIO_INTR_LOW_LEVEL` before each sleep
+- `esp_light_sleep_start()` blocks until wake (timer or GPIO)
+- After timer wake: `esp_wifi_start()` triggers auto-reconnect via WIFI_EVENT_STA_START
+- After button wake: display updates, no WiFi needed, returns to sleep
+- RAM preserved during light sleep, so static variables retain values
+
+### Light sleep architecture
+
+For lower power (~0.7-3 mA), use light sleep. WiFi must be stopped before sleep. After wake:
+- **Button press**: display on for 6s, no WiFi needed → sleep again
+- **Timer (5 min)**: restart WiFi → read sensors → upload → stop WiFi → sleep again
+
+WiFi stop/start takes ~2–5 s per cycle.
+
+### Deep sleep architecture (lowest power, timer-only)
+
+For battery-powered operation without button response:
+```c
+esp_wifi_stop();
+esp_deep_sleep(300000000);  // 5 min
+```
+On wake: full boot → `app_main()` → WiFi connect → read sensors → upload → deep sleep.
+
+Button cannot wake from deep sleep without hardware modification (button → RST pin).
+
+### Button → RST hardware modification
+
+To enable button wake from deep sleep:
+1. Connect button leg 1 → GPIO12 (D6)
+2. Connect button leg 2 → RST pin via NPN transistor (collector = RST, emitter = GND, base = GPIO12 via 1kΩ)
+3. D5 (GPIO14) = output LOW (no longer needed for button GND)
+4. Use `esp_deep_sleep(0)` (no timer) or `esp_deep_sleep(time_us)` (with timer)
+5. OR simpler: button directly to RST (but leaves ESP8266 floating risk)
+
+The client must be configured for the chosen power mode (default: light sleep).
 
 ## Client OLED display — dual-screen layout (128×32)
 
-Two screens cycle every 3 seconds. GLCD 5×7 font at 2× scale (12px/char, 14px tall).
+Two screens cycle every 3 seconds (display is ON for 6s total). GLCD 5×7 font at 2× scale (12px/char, 14px tall).
 
-### Screen 0 — Temperature + Uptime
+### Screen 0 — Temperature + Time
 ```
        27.5C         (centered)
-     01:23:45        (centered, HH:MM:SS uptime)
+     01:23:45        (centered, HH:MM:SS time)
 ```
 
 ### Screen 1 — Humidity + Air Quality
@@ -106,7 +177,7 @@ Two screens cycle every 3 seconds. GLCD 5×7 font at 2× scale (12px/char, 14px 
 252TV AQI3          (TVOC, Air Quality Index)
 ```
 
-`update_display()` is called immediately on task start, then every 3 seconds on screen toggle, and on every sensor read (every 5 minutes after data refresh).
+`update_display()` is called on button press (screen 0), then at 3s (switch to screen 1), and on every sensor read (every 5 minutes).
 
 ## Agent rules for the codebase and building
 
@@ -266,7 +337,7 @@ The server runs a UDP listener on port 5000 that responds to `AIRMON_DISCOVER` p
 | MCU | ESP8266EX (Xtensa LX106, single core, silicon revision 1) |
 | Flash | 4 MB external (connected as 2 MB in sdkconfig, QIO mode) |
 | RAM | ~107 KB free at boot (IRAM + DRAM) |
-| Clock | 80 MHz / 160 MHz (configured to 160 MHz) |
+| Clock | 80 MHz / 160 MHz (configured to **80 MHz** for power saving) |
 | Crystal | 26 MHz |
 | Voltage | 3.3 V logic (5 V tolerant on some pins via USB regulator) |
 | USB | Micro-B (CH340G USB-to-serial) |
@@ -493,27 +564,26 @@ Wemos D1 Mini                    I2C Bus (shared SDA + SCL)
 | Property | Value |
 |---|---|
 | Type | Momentary tactile switch (NO - normally open) |
-| GPIO | D6 (GPIO12) |
-| Wiring | One leg → GPIO12, other leg → GND |
-| Pull-up | Internal pull-up resistor enabled |
-| Active | Low (pressed = GPIO reads 0) |
-| Debounce | 50 ms software debounce |
-| Behavior | Press → display ON for 10 seconds, then auto-off |
+| GPIO | D6 (GPIO12) = input with internal pull-up, D5 (GPIO14) = output LOW |
+| Wiring | Button connects D5 (GPIO14) and D6 (GPIO12) |
+| Interrupt | GPIO_INTR_NEGEDGE (falling edge on press) |
+| Active | Low (pressed = GPIO12 reads 0) |
+| ISR | `vTaskNotifyGiveFromISR` → wakes `client_task` immediately |
+| Behavior | Press → display ON for 6 seconds (2 screens × 3s), then auto-off |
 
 ```
 Wemos D1 Mini
 ┌─────────────┐
-│ D6 (GPIO12) ├────┐
-│ GND         ├────┤
+│ D5 (GPIO14) ├────┐   output LOW (always GND)
+│ D6 (GPIO12) ├────┤   input + pull-up, NEGEDGE interrupt
 └─────────────┘    │
                 ┌──┴──┐
-                │ BTN │  (tactile switch)
+                │ BTN │  (tactile switch, NO)
                 └──┬──┘
                    │
-                 (both legs connected as shown)
 ```
 
-**Note:** GPIO12 (D6) is chosen because it has no special boot-strapping requirements. Avoid GPIO0 (D3) as it affects boot mode.
+GPIO12 (D6) is chosen because it has no special boot-strapping requirements. GPIO14 (D5) drives the button's ground side — no external resistor needed.
 
 ### I2C device addresses on the bus
 
@@ -540,7 +610,7 @@ No address conflicts exist. All three devices can coexist on the same bus.
 - ESP-IDF version: v3.4-110-gd412ac60
 - Flash mode: QIO, 40 MHz
 - Flash size: 4 MB physical (configured as 2 MB in sdkconfig — works fine)
-- CPU frequency: 160 MHz
+- CPU frequency: 80 MHz
 - Monitor baud: 74880
 
 ## Adding new I2C drivers
