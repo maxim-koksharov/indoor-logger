@@ -38,10 +38,11 @@ Two ESP8266 devices communicating over WiFi (both connect to your home router):
 All three I2C devices share a single bus (bus 0):
 
 | Wemos Pin | GPIO | Connection |
-|---|---|---|
+|---|---|---|---|
 | D1 | GPIO5 | I2C SCL (OLED + ENS160 + AHT21) |
 | D2 | GPIO4 | I2C SDA (OLED + ENS160 + AHT21) |
-| D6 | GPIO12 | Tactile button (to GND) |
+| D5 | GPIO14 | Output LOW (button GND) |
+| D6 | GPIO12 | Input pull-up (button sense) |
 | 3V3 | — | VCC (all modules) |
 | GND | — | GND (all modules) |
 
@@ -57,26 +58,40 @@ All three I2C devices share a single bus (bus 0):
 **SDK**: ESP8266 RTOS SDK v3.4 (`/esp/ESP8266_RTOS_SDK`)
 **Toolchain**: `/esp/bin/xtensa-lx106-elf/bin`
 
-### Основные команды
+Все команды выполняются внутри Docker-контейнера (см. `AGENTS.md` для сборки/запуска).
+
+### Menuconfig (однократная настройка)
 
 ```bash
-export IDF_PATH=/esp/ESP8266_RTOS_SDK
+# Клиент: Client ID, WiFi SSID/pass
+idf.py -C apps/client menuconfig
 
-# Menuconfig (настройка параметров)
-cd apps/client && idf.py menuconfig   # Client ID, display timeout, WiFi SSID/pass
-cd apps/server && idf.py menuconfig   # WiFi SSID/pass, flash, CPU frequency
-
-# Сборка
-cd apps/client && idf.py build
-cd apps/server && idf.py build
-
-# Прошивка
-cd apps/client && idf.py -p /dev/ttyUSB0 flash
-cd apps/server && idf.py -p /dev/ttyUSB1 flash
-
-# Очистка
-cd apps/client && idf.py fullclean
+# Сервер: WiFi SSID/pass (основной + резервный)
+idf.py -C apps/server menuconfig
 ```
+
+### Сборка
+
+```bash
+idf.py -C apps/client build
+idf.py -C apps/server build
+```
+
+### Прошивка
+
+```bash
+idf.py -C apps/client -p /dev/ttyUSB0 flash
+idf.py -C apps/server -p /dev/ttyUSB1 flash
+```
+
+### Очистка
+
+```bash
+idf.py -C apps/client fullclean
+idf.py -C apps/server fullclean
+```
+
+> Полный список команд, включая мониторинг и стирание, в `AGENTS.md`.
 
 ## Настройка WiFi
 
@@ -85,12 +100,11 @@ WiFi SSID и пароль задаются через `menuconfig` при сбо
 ### Сервер
 
 ```bash
-cd apps/server
-idf.py menuconfig
+idf.py -C apps/server menuconfig
 # Server Configuration → Primary WiFi SSID & Password
 #                      → Backup WiFi SSID & Password (опционально)
-idf.py build
-idf.py -p /dev/ttyUSB1 flash
+idf.py -C apps/server build
+idf.py -C apps/server -p /dev/ttyUSB1 flash
 ```
 
 **Режим работы:**
@@ -114,13 +128,12 @@ NVS имеет приоритет над menuconfig.
 ### Клиент
 
 ```bash
-cd apps/client
-idf.py menuconfig
-# Client Configuration → WiFi SSID (same as server)
+idf.py -C apps/client menuconfig
+# Client Configuration → Client device identifier
+#                      → WiFi SSID (same as server)
 #                      → WiFi password (same as server)
-#                      → Server discovery timeout (ms, default 3000)
-idf.py build
-idf.py -p /dev/ttyUSB0 flash
+idf.py -C apps/client build
+idf.py -C apps/client -p /dev/ttyUSB0 flash
 ```
 
 **Режим работы:**
@@ -135,11 +148,14 @@ idf.py -p /dev/ttyUSB0 flash
 
 **Для клиента** (`Client Configuration`):
 - `Client device identifier` — уникальный ID устройства (по умолчанию `test_client`).
-  Это значение передаётся как `?id=<client_id>` при upload на сервер.
-- `Display auto-off timeout` — через сколько секунд гаснет дисплей (0 = всегда включён).
+  Используется как `?id=<client_id>` при upload на сервер.
+- `WiFi SSID / Password` — параметры подключения к роутеру (должны совпадать с сервером).
 
 Изменения сохраняются в `sdkconfig` и применяются при `idf.py build`.
-Конфиг-опции доступны в коде как `CONFIG_CLIENT_ID`, `CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC`.
+Конфиг-опции доступны в коде как `CONFIG_CLIENT_ID` и т.д.
+
+**Дисплей:** По умолчанию выключен. Включается на 6 секунд по нажатию кнопки
+(2 экрана × 3 секунды: темп/время → CO₂/VOC/AQI).
 
 ### Serial Monitor
 
@@ -319,25 +335,8 @@ wifi_sync_upload()  ─── POST /api/upload?id=<id> ──→  data_store_app
 ├── apps/
 │   ├── server/               # Server firmware (16MB flash)
 │   │   └── main/             # main.c, data_store.c, client_registry.c, http_server.c
-│   │       └── Kconfig.projbuild  # WiFi SSID/pass options
 │   └── client/               # Client firmware (4MB flash)
 │       └── main/             # main.c, data_storage.c, wifi_sync.c, button.c
-│           └── Kconfig.projbuild  # Client ID, display timeout, WiFi SSID/pass, server IP
-├── README.md
-├── AGENTS.md
-└── TODO.md
-```
-├── components/               # Shared IDF-style components
-│   ├── display/              # SSD1306 OLED driver + C wrapper
-│   ├── sensors/              # ENS160 + AHT21 I2C drivers
-│   ├── fonts/                # Bitmap font library
-│   └── wifi/                 # WiFi manager
-├── apps/
-│   ├── server/               # Server firmware (16MB flash)
-│   │   └── main/             # main.c, data_store.c, client_registry.c, http_server.c
-│   └── client/               # Client firmware (4MB flash)
-│       └── main/             # main.c, data_storage.c, wifi_sync.c, button.c
-│           └── Kconfig.projbuild  # Client ID, display timeout options
 ├── README.md
 ├── AGENTS.md
 └── TODO.md
