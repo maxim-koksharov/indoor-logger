@@ -60,6 +60,7 @@ static const char *TAG = "client";
 
 static Display display;
 static const font_info_t *display_font = NULL;
+static TaskHandle_t client_task_handle = NULL;
 
 static aht21_data_t last_aht_data = {0};
 static ens160_data_t last_ens_data = {0};
@@ -122,6 +123,9 @@ static void update_display(void) {
 }
 
 static void client_task(void *pvParameters) {
+    static int task_start_count = 0;
+    task_start_count++;
+    
     TickType_t last_sensor_read = 0;
     TickType_t now_init = xTaskGetTickCount();
     last_sensor_read = now_init;
@@ -131,16 +135,21 @@ static void client_task(void *pvParameters) {
     TickType_t display_on_until = 0;
     TickType_t last_screen_switch = 0;
     int display_screen = 0;
+    int initial_polls_remaining = 6;
     
     display_off(&display);
     
-    ESP_LOGI(TAG, "[TASK] Client task started (client_id=%s)", CONFIG_CLIENT_ID);
+    ESP_LOGI(TAG, "[TASK] Client task started #%d (client_id=%s)", task_start_count, CONFIG_CLIENT_ID);
     
     while (1) {
         TickType_t now = xTaskGetTickCount();
         esp_task_wdt_reset();
+
+        bool button_pressed = button_is_pressed_debounced();
         
-        bool button_pressed = button_is_pressed();
+        if (button_pressed) {
+            ESP_LOGI(TAG, "[BUTTON] Detected press (debounced)");
+        }
         
         if (display_active) {
             if (now >= display_on_until) {
@@ -161,6 +170,7 @@ static void client_task(void *pvParameters) {
             ens160_data_t ens_data = {0};
             
             int aht_ret = aht21_read(I2C_NUM_0, &aht_data);
+            esp_task_wdt_reset();
             if (aht_ret == 0) {
                 last_aht_data = aht_data;
                 int t_int = (int)aht_data.temperature;
@@ -173,6 +183,7 @@ static void client_task(void *pvParameters) {
             
 #if ENS160_ENABLE
             int ens_ret = ens160_read(I2C_NUM_0, &ens_data);
+            esp_task_wdt_reset();
             if (ens_ret == 0) {
                 last_ens_data = ens_data;
                 ESP_LOGI(TAG, "[SENSORS] ENS160: eCO2=%u TVOC=%u AQI=%u", ens_data.eco2, ens_data.tvoc, ens_data.aqi);
@@ -181,6 +192,7 @@ static void client_task(void *pvParameters) {
             }
             
             ens160_set_env(I2C_NUM_0, last_aht_data.temperature, last_aht_data.humidity);
+            esp_task_wdt_reset();
 #else
             (void)ens_data;
             ESP_LOGI(TAG, "[SENSORS] ENS160 disabled");
@@ -207,6 +219,7 @@ static void client_task(void *pvParameters) {
             
             update_display();
             last_sensor_read = now;
+            esp_task_wdt_reset();
             
             if (!wifi_initialized) {
                 ESP_LOGI(TAG, "[WIFI] Connecting...");
@@ -223,6 +236,7 @@ static void client_task(void *pvParameters) {
                     ESP_LOGW(TAG, "[WIFI] No SSID configured (CONFIG_CLIENT_WIFI_SSID)");
                 }
             }
+            esp_task_wdt_reset();
             
             if (wifi_initialized) {
                 ESP_LOGI(TAG, "[WIFI] Uploading...");
@@ -232,16 +246,19 @@ static void client_task(void *pvParameters) {
                     ESP_LOGW(TAG, "[WIFI] Upload failed");
                 }
             }
+            esp_task_wdt_reset();
         }
         
         if (button_pressed && !display_active) {
+            ESP_LOGI(TAG, "[BUTTON] Turning display ON");
             display_active = true;
             display_on_until = now + pdMS_TO_TICKS(DISPLAY_ON_MS);
             display_screen = 0;
             last_screen_switch = now;
             display_on(&display);
             update_display();
-            ESP_LOGI(TAG, "[BUTTON] Pressed, display ON for %dms", DISPLAY_ON_MS);
+            // Clear flag to prevent re-triggering while button is held
+            button_was_pressed();
         }
         
         TickType_t time_to_sensor_ticks = pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS) - (now - last_sensor_read);
@@ -254,31 +271,50 @@ static void client_task(void *pvParameters) {
             }
         }
         
-        if (button_pressed) {
-            sleep_ticks = pdMS_TO_TICKS(100);
+        if (initial_polls_remaining > 0) {
+            sleep_ticks = pdMS_TO_TICKS(5000);
+            initial_polls_remaining--;
         }
         
         if (sleep_ticks > pdMS_TO_TICKS(10)) {
-            if (wifi_initialized) {
-                ESP_LOGI(TAG, "[WIFI] Stopping for light sleep");
-                esp_err_t stop_ret = esp_wifi_stop();
-                if (stop_ret != ESP_OK) {
-                    ESP_LOGW(TAG, "[WIFI] esp_wifi_stop() failed: %d", stop_ret);
+            // If button is currently held, don't enter light sleep to avoid
+            // immediate wake-up loop that starves the watchdog.
+            // The falling edge is already captured by ISR / post-wake check,
+            // so we don't need to set the flag again here.
+            static bool last_sleep_skip_logged = false;
+            if (button_is_pressed()) {
+                if (!last_sleep_skip_logged) {
+                    ESP_LOGI(TAG, "[SLEEP] Button held, skipping light sleep");
+                    last_sleep_skip_logged = true;
                 }
-            }
-            
-            button_enable_wakeup();
-            
-            uint32_t sleep_ms = sleep_ticks * portTICK_PERIOD_MS;
-            uint64_t sleep_us = ((uint64_t)sleep_ms) * 1000;
-            ESP_LOGI(TAG, "[SLEEP] Light sleep for %u ms (button wake enabled)", sleep_ms);
-            
-            esp_sleep_enable_timer_wakeup(sleep_us);
-            esp_light_sleep_start();
-            
+            } else {
+                last_sleep_skip_logged = false;
+                if (wifi_initialized) {
+                    ESP_LOGI(TAG, "[WIFI] Stopping for light sleep");
+                    esp_err_t stop_ret = esp_wifi_stop();
+                    if (stop_ret != ESP_OK) {
+                        ESP_LOGW(TAG, "[WIFI] esp_wifi_stop() failed: %d", stop_ret);
+                    }
+                }
+
+                button_enable_wakeup();
+
+                uint32_t sleep_ms = sleep_ticks * portTICK_PERIOD_MS;
+                uint64_t sleep_us = ((uint64_t)sleep_ms) * 1000;
+                ESP_LOGI(TAG, "[SLEEP] Light sleep for %u ms (button wake enabled)", sleep_ms);
+
+                esp_sleep_enable_timer_wakeup(sleep_us);
+                esp_light_sleep_start();
+
+            int wake_gpio = gpio_get_level((gpio_num_t)BUTTON_GPIO);
+            ESP_LOGI(TAG, "[WAKE] raw GPIO=%d isr_count=%u", wake_gpio, button_get_isr_count());
+
             button_disable_wakeup();
-            
-            if (wifi_initialized && button_is_pressed()) {
+
+            // Check if woken by button by checking current GPIO state
+            bool woke_by_button = button_is_pressed();
+            if (woke_by_button) {
+                button_set_pressed_flag();
                 ESP_LOGI(TAG, "[WAKE] GPIO (button)");
             } else if (wifi_initialized) {
                 ESP_LOGI(TAG, "[WAKE] Timer");
@@ -291,6 +327,7 @@ static void client_task(void *pvParameters) {
                 int retry = 0;
                 while (!wifi_manager_is_connected() && retry < 30) {
                     vTaskDelay(pdMS_TO_TICKS(1000));
+                    esp_task_wdt_reset();
                     retry++;
                 }
                 
@@ -301,6 +338,9 @@ static void client_task(void *pvParameters) {
                 }
             }
         }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -335,6 +375,23 @@ void app_main(void) {
     if (aht_init_ret != 0) {
         ESP_LOGE(TAG, "Failed to initialize AHT21");
     }
+
+    // Read sensors once to initialize display data
+    aht21_data_t aht_data = {0};
+    ens160_data_t ens_data = {0};
+    if (aht21_read(I2C_NUM_0, &aht_data) == 0) {
+        last_aht_data = aht_data;
+        int t_int = (int)aht_data.temperature;
+        int t_dec = (int)(aht_data.temperature * 10) % 10;
+        if (t_dec < 0) t_dec = -t_dec;
+        ESP_LOGI(TAG, "Initial sensor read: T=%d.%d H=%d", t_int, t_dec, (int)aht_data.humidity);
+    }
+#if ENS160_ENABLE
+    if (ens160_read(I2C_NUM_0, &ens_data) == 0) {
+        last_ens_data = ens_data;
+        ESP_LOGI(TAG, "Initial sensor read: CO2=%u TVOC=%u AQI=%u", ens_data.eco2, ens_data.tvoc, ens_data.aqi);
+    }
+#endif
 
     button_init();
 
@@ -389,7 +446,8 @@ void app_main(void) {
     }
 
     // Create client task with 4KB stack
-    xTaskCreate(client_task, "client_task", 4096, NULL, 5, NULL);
+    xTaskCreate(client_task, "client_task", 4096, NULL, 5, &client_task_handle);
+    button_set_task_handle(client_task_handle);
     
     ESP_LOGI(TAG, "Client task created");
     

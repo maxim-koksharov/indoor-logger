@@ -1,19 +1,20 @@
 #include "button.h"
 #include "driver/gpio.h"
-#include "esp_attr.h"
 #include "esp_sleep.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-static TaskHandle_t button_task = NULL;
+#define DEBOUNCE_TIME_MS 50
+#define LONG_PRESS_IGNORE_MS 5000
 
-void IRAM_ATTR button_isr_handler(void *arg) {
-    TaskHandle_t task = (TaskHandle_t)arg;
-    if (task == NULL) return;
-    BaseType_t woken = pdFALSE;
-    vTaskNotifyGiveFromISR(task, &woken);
-    if (woken) {
-        portYIELD_FROM_ISR();
-    }
-}
+static const char *TAG = "button";
+static bool last_button_state = false;
+static TickType_t last_state_change_time = 0;
+static bool debounced_state = false;
+static bool long_press_ignore = false;
+static TickType_t press_start_time = 0;
+static bool press_reported = false;
 
 void button_init(void) {
     gpio_config_t io_conf = {
@@ -21,7 +22,7 @@ void button_init(void) {
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE,
+        .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
 
@@ -35,13 +36,16 @@ void button_init(void) {
     gpio_config(&gnd_conf);
     gpio_set_level((gpio_num_t)BUTTON_GPIO_GND, 0);
 
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add((gpio_num_t)BUTTON_GPIO, button_isr_handler, (void*)NULL);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    last_button_state = button_is_pressed();
+    debounced_state = last_button_state;
+    long_press_ignore = false;
+    press_reported = false;
 }
 
 void button_set_task_handle(TaskHandle_t task) {
-    button_task = task;
-    gpio_isr_handler_add((gpio_num_t)BUTTON_GPIO, button_isr_handler, (void*)button_task);
+    (void)task;
 }
 
 bool button_is_pressed(void) {
@@ -51,6 +55,63 @@ bool button_is_pressed(void) {
 #else
     return (level == 1);
 #endif
+}
+
+bool button_was_pressed(void) {
+    return false;
+}
+
+bool button_is_pressed_flag(void) {
+    return false;
+}
+
+void button_set_pressed_flag(void) {
+}
+
+uint32_t button_get_isr_count(void) {
+    return 0;
+}
+
+bool button_is_pressed_debounced(void) {
+    bool current_state = button_is_pressed();
+    TickType_t now = xTaskGetTickCount();
+    bool result = false;
+
+    if (current_state != last_button_state) {
+        last_button_state = current_state;
+        last_state_change_time = now;
+        if (current_state) {
+            press_start_time = now;
+            // Force a fresh debounce cycle for this new press. This handles
+            // the case where the user releases after a long press and quickly
+            // presses again while debounced_state was still true.
+            debounced_state = false;
+            press_reported = false;
+            long_press_ignore = false;
+        } else {
+            long_press_ignore = false;
+            press_reported = false;
+        }
+    } else if ((now - last_state_change_time) >= pdMS_TO_TICKS(DEBOUNCE_TIME_MS)) {
+        if (debounced_state != current_state) {
+            debounced_state = current_state;
+        }
+        if (debounced_state && !press_reported && !long_press_ignore) {
+            press_reported = true;
+            result = true;
+        }
+    }
+
+    if (debounced_state && (now - press_start_time) >= pdMS_TO_TICKS(LONG_PRESS_IGNORE_MS)) {
+        long_press_ignore = true;
+    }
+
+    if (!debounced_state) {
+        long_press_ignore = false;
+        press_reported = false;
+    }
+
+    return result;
 }
 
 void button_enable_wakeup(void) {

@@ -18,6 +18,11 @@ extern "C" {
 void button_init(void);
 void button_set_task_handle(TaskHandle_t task);
 bool button_is_pressed(void);
+bool button_was_pressed(void);
+bool button_is_pressed_flag(void);
+void button_set_pressed_flag(void);
+uint32_t button_get_isr_count(void);
+bool button_is_pressed_debounced(void);
 void button_enable_wakeup(void);
 void button_disable_wakeup(void);
 
