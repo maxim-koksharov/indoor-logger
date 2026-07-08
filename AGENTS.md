@@ -16,13 +16,23 @@ C code only. All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}`
 **All development runs inside a Docker container** based on `ubuntu:20.04` (image: `esp8266-env`).
 
 - Container image built from `Dockerfile` at project root
-- Project directory mounted at `/esp/project`
+- `docker compose.yml` defines the runtime: bind-mounts the project, USB devices, and the host's opencode config/license
+- Project directory mounted at `/workspace`
 - SDK located at `/esp/ESP8266_RTOS_SDK`
 - Toolchain at `/esp/bin/xtensa-lx106-elf/bin`
 - Two USB serial devices passed through:
   - `/dev/ttyUSB0` — **Client** (Wemos D1 Mini + OLED display + ENS160+AHT21 sensors)
   - `/dev/ttyUSB1` — **Server** (Wemos D1 Mini, 16MB flash)
-- Launch opencode in docker (from host system) via `./run_opencode_docker.sh`
+- Container runs as the host user (UID:GID from `.env`) so files keep host ownership
+- `~/.config/opencode` and `~/.local/share/opencode` are bind-mounted, so the opencode **license/auth from the host** is used inside the container
+
+### Run commands (from project root on the host)
+
+| Action | Command |
+|---|---|
+| Build image (first time, or after Dockerfile change) | `docker compose build` |
+| Interactive shell | `docker compose run --rm bash` |
+| opencode TUI | `docker compose run --rm opencode` |
 
 ## Build system
 
@@ -34,7 +44,7 @@ C code only. All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}`
 export IDF_PATH=/esp/ESP8266_RTOS_SDK
 ```
 
-This is already set in the Docker image via `ENV` and `/etc/bash.bashrc`.
+This is already set in the Docker image via `ENV`.
 
 ### Commands
 
