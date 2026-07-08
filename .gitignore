@@ -53,3 +53,10 @@ sdkconfig*
 .env/
 .env*
 .opencode*
+
+# Runtime artefacts created inside the container bind-mount
+.docker_home/
+.opencode-home/
+.cache/
+.config/
+.local/
