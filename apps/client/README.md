@@ -26,21 +26,21 @@ OLED display, sensor readings, local data storage, and WiFi sync to server.
 ```bash
 cd apps/client
 
-# Configure (опционально — меняет client_id, таймаут дисплея)
+# Configure (optional — changes client_id, display timeout)
 idf.py menuconfig
   → Client Configuration
     → Client device identifier  (CONFIG_CLIENT_ID, default: test_client)
     → Display auto-off timeout  (CONFIG_CLIENT_DISPLAY_TIMEOUT_SEC, default: 10)
 
-# Собрать
+# Build
 idf.py build
 
-# Прошить
+# Flash
 idf.py -p /dev/ttyUSB0 flash
 ```
 
-**Важно**: `CONFIG_CLIENT_ID` — уникальный идентификатор клиента (`living_room`, `kitchen`).
-Если не менять — будет `test_client`.
+**Important**: `CONFIG_CLIENT_ID` is the unique client identifier (e.g. `living_room`, `kitchen`).
+If left unchanged, it defaults to `test_client`.
 
 ## Feature Summary
 
@@ -54,9 +54,9 @@ idf.py -p /dev/ttyUSB0 flash
 
 ## Client ID
 
-Настраивается через `menuconfig` → `Client Configuration → Client device identifier`.
-ID передаётся в query-параметре `/api/upload?id=<id>` при каждом upload.
-На сервере данные хранятся в файле `/spiffs/<id>.dat`.
+Configured via `menuconfig` → `Client Configuration → Client device identifier`.
+The ID is passed as the `?id=<id>` query parameter on every upload.
+On the server, the data is stored in the file `/spiffs/<id>.dat`.
 
 ## ENS160 Configuration
 
@@ -109,15 +109,15 @@ Every 30 seconds:
 
 ## Self-Test at Startup
 
-Клиент логирует self-test summary после инициализации всех компонентов:
+The client logs a self-test summary after all components are initialized:
 
 ```
 === SELF-TEST ===
   NVS: OK
   I2C: init OK (SDA=GPIO4 SCL=GPIO5)
   Display: initialized
-  ENS160: detected          (или "warming" / "disabled")
-  AHT21: detected           (или "failed")
+  ENS160: detected          (or "warming" / "disabled")
+  AHT21: detected           (or "failed")
   SPIFFS: OK (total=1048576 used=16384)
   Storage: 125 records saved
   Client ID: living_room

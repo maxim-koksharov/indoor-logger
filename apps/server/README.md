@@ -25,13 +25,13 @@ WiFi access point, HTTP REST API, sensor data aggregation, and embedded web dash
 ```bash
 cd apps/server
 
-# Configure (опционально)
+# Configure (optional)
 idf.py menuconfig
 
-# Собрать
+# Build
 idf.py build
 
-# Прошить
+# Flash
 idf.py -p /dev/ttyUSB1 flash
 ```
 
@@ -46,13 +46,13 @@ idf.py -p /dev/ttyUSB1 flash
 | Client Registry | RAM array (max 16 clients) with NVS persistence |
 | Web UI | Zero-SPIFFS, embedded HTML/CSS/JS in `.rodata`, Canvas graphs, dark theme |
 
-## STA Credentials (подключение к домашней WiFi)
+## STA Credentials (connecting to home WiFi)
 
-Сервер может работать в режиме AP+STA (одновременно раздавать WiFi и подключаться к домашней сети для NTP).
+The server can run in AP+STA mode (broadcast WiFi while also connecting to your home network for NTP).
 
-Креденшиалы хранятся в NVS (`wifi:sta_ssid`, `wifi:sta_pass`). Если их нет — сервер работает в AP-only режиме.
+Credentials are stored in NVS (`wifi:sta_ssid`, `wifi:sta_pass`). If they are not set, the server runs in AP-only mode.
 
-**Запись через прошивку или provisioning:**
+**Writing credentials via firmware or provisioning:**
 
 ```c
 nvs_handle_t nvs;
@@ -63,8 +63,8 @@ nvs_commit(nvs);
 nvs_close(nvs);
 ```
 
-При старте сервер пытается подключиться к STA (30s timeout). Успех → AP+STA + NTP.
-Неудача → AP-only.
+On startup the server tries to connect via STA (30s timeout). On success → AP+STA + NTP.
+On failure → AP-only.
 
 ## API Endpoints
 
@@ -91,14 +91,14 @@ Fields: `t`=temperature, `h`=humidity, `c`=eCO₂, `v`=TVOC, `a`=AQI.
 
 ## Timestamps
 
-Если NTP недоступен (AP-only режим), `time(NULL)` возвращает 0.
-Сервер использует `server_get_timestamp()`:
-- если `time(NULL) > 0` — возвращает Unix timestamp
-- иначе — возвращает uptime с момента запуска сервера
+If NTP is unavailable (AP-only mode), `time(NULL)` returns 0.
+The server uses `server_get_timestamp()`:
+- if `time(NULL) > 0` — returns a Unix timestamp
+- otherwise — returns uptime since the server started
 
 ## Self-Test at Startup
 
-Сервер логирует self-test summary после инициализации:
+The server logs a self-test summary after initialization:
 
 ```
 === SELF-TEST ===
