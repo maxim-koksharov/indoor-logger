@@ -5,18 +5,18 @@ x-common: &common
     context: .
     dockerfile: Dockerfile
 
-  # Проект будет доступен внутри контейнера здесь:
+  # Project root is mounted here
   working_dir: /workspace
 
-  # Запуск от юзера хоста (Linux). Не root.
-  user: "${UID}:${GID}"
-  
-  # Добавляем пользователя в группу dialout (GID 20) для доступа к /dev/ttyUSB*
+  # Run as the host user so files created in the bind mount keep host ownership
+  user: "${UID:-1000}:${GID:-1000}"
+
+  # dialout (GID 20) is needed for /dev/ttyUSB* access on the host
   group_add:
     - "20"
 
-  # Настраиваем переменные окружения, указывая на домашнюю директорию,
-  # к которой у пользователя гарантированно будут права на запись.
+  # XDG paths are redirected inside the workspace so the non-root user
+  # can always write to them; the real configs from the host are bind-mounted below
   environment:
     - HOME=/workspace/.opencode-home
     - XDG_CONFIG_HOME=/workspace/.opencode-home/.config
@@ -24,32 +24,34 @@ x-common: &common
     - XDG_CACHE_HOME=/workspace/.opencode-home/.cache
 
   volumes:
-    # === 1) ПАПКА ПРОЕКТА ===
-    # Монтируем текущую папку проекта (где лежит compose.yml) в /workspace
+    # 1) Project source tree
     - ".:/workspace:rw"
 
-    # === 2) OPENCODE: КОНФИГИ + АУТЕНТИФИКАЦИЯ ===
-    # Монтируем конфигурационные папки хоста напрямую в новые XDG-пути внутри контейнера
+    # 2) opencode: configs + license/auth from the host
     - "${HOME}/.config/opencode:/workspace/.opencode-home/.config/opencode:rw"
     - "${HOME}/.local/share/opencode:/workspace/.opencode-home/.local/share/opencode:rw"
     - "${HOME}/.cache/opencode:/workspace/.opencode-home/.cache/opencode:rw"
 
-  # === 3) ПРОБРОС ТУЛЧЕЙНА И ПЛАТЫ ===
-  # Пробрасываем USB-программатор (например, CP2102 или CH340) для прошивки ESP8266
+  # 3) USB programmer passthrough (CP2102 / CH340 / etc.)
   devices:
     - "/dev/ttyUSB0:/dev/ttyUSB0"
     - "/dev/ttyUSB1:/dev/ttyUSB1"
-  
-  # Даем контейнеру права на управление устройствами (необходимо для работы esptool/idf.py monitor)
-  device_cgroup_rules:
-    - 'c 188:* rmw' # Разрешает чтение/запись/создание для ttyUSB устройств
-    - 'c 166:* rmw' # Разрешает чтение/запись/создание для ttyACM устройств
 
-  # Для удобной интерактивной работы
+  # Allow esptool / idf.py monitor to manage tty devices
+  device_cgroup_rules:
+    - "c 188:* rmw"  # ttyUSB*
+    - "c 166:* rmw"  # ttyACM*
+
   tty: true
   stdin_open: true
 
 services:
+  # Interactive shell inside the container
   bash:
     <<: *common
     command: ["bash"]
+
+  # opencode TUI inside the container
+  opencode:
+    <<: *common
+    command: ["opencode"]
