@@ -61,6 +61,12 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 .basic-mode-settings button { background: #333; color: #e0e0e0; border: 1px solid #555; padding: 7px 14px; cursor: pointer; font-family: inherit; border-radius: 4px; }
 .basic-mode-settings button.active { background: #4CAF50; color: #fff; border-color: #4CAF50; }
 .basic-mode-settings #basic-mode-status { margin-left: 10px; color: #4CAF50; }
+.id-settings { background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
+.id-settings label { margin-right: 10px; color: #888; }
+.id-settings input { background: #333; color: #e0e0e0; border: 1px solid #555; padding: 6px 10px; width: 200px; font-family: inherit; border-radius: 4px; }
+.id-settings button { background: #4CAF50; color: #fff; border: none; padding: 7px 14px; cursor: pointer; font-family: inherit; border-radius: 4px; margin-left: 10px; }
+.id-settings button:disabled { background: #555; cursor: not-allowed; }
+.id-settings #id-status { margin-left: 10px; color: #4CAF50; }
 @media (max-width: 600px) {
   body { padding: 10px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
@@ -97,6 +103,12 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 </table>
 <div class="card" id="detail">
 <h2 id="detail-title"></h2>
+<div class="id-settings" id="id-row" style="display:none">
+  <label for="id-input">Client ID (digits only):</label>
+  <input type="text" id="id-input" maxlength="31" pattern="[0-9]+">
+  <button id="id-save" onclick="saveClientId()">Save</button>
+  <span id="id-status"></span>
+</div>
 <div class="basic-mode-settings" id="basic-mode-row" style="display:none">
   <label>Sensor mode:</label>
   <button id="basic-mode-toggle" onclick="toggleBasicMode()">Loading...</button>
@@ -157,6 +169,42 @@ function cancelName() {
   document.getElementById('name-display').style.display = 'inline';
 }
 
+async function saveClientId() {
+  if (!currentClientId) return;
+  const input = document.getElementById('id-input');
+  const btn = document.getElementById('id-save');
+  const status = document.getElementById('id-status');
+  const value = input.value.trim();
+  if (!/^[0-9]+$/.test(value) || value.length < 1 || value.length > 31) {
+    status.textContent = 'Invalid ID (digits only, 1-31 chars)';
+    status.style.color = '#f44336';
+    return;
+  }
+  if (value === currentClientId) {
+    status.textContent = 'Same as current';
+    status.style.color = '#888';
+    return;
+  }
+  if (!confirm('Rename client "' + currentClientId + '" to "' + value + '"? The client will show the new ID on its display for 5 seconds on next sync.')) {
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = 'Saving...';
+  status.style.color = '#888';
+  try {
+    const r = await fetchJSON('/api/client/id?id=' + encodeURIComponent(currentClientId) + '&new_id=' + encodeURIComponent(value), 'POST');
+    status.textContent = 'Renamed to: ' + r.new_id;
+    status.style.color = '#4CAF50';
+    currentClientId = r.new_id;
+    setTimeout(function() { showDetail(currentClientId); fetchClients(); }, 800);
+  } catch (e) {
+    status.textContent = 'Failed: ' + e.message;
+    status.style.color = '#f44336';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function setError(msg) {
   const bar = document.getElementById('error-bar');
   if (msg && msg !== lastError) {
@@ -187,10 +235,22 @@ async function fetchJSON(url, method) {
 async function fetchStatus() {
   try {
     const d = await fetchJSON('/api/health');
+    let flashHtml = '';
+    try {
+      const s = await fetchJSON('/api/storage');
+      const usedMB = (s.used / (1024 * 1024)).toFixed(2);
+      const totalMB = (s.total / (1024 * 1024)).toFixed(2);
+      const freeMB = (s.free / (1024 * 1024)).toFixed(2);
+      const usedPct = s.total > 0 ? ((s.used / s.total) * 100).toFixed(0) : 0;
+      flashHtml = '<span>Flash: ' + usedMB + ' / ' + totalMB + ' MB (' + usedPct + '%, free ' + freeMB + ' MB)</span>';
+    } catch (fe) {
+      flashHtml = '<span class="waiting">Flash: N/A</span>';
+    }
     document.getElementById('status').innerHTML =
       '<span>Uptime: ' + d.uptime.toFixed(0) + 's</span>' +
       '<span>Heap: ' + (d.free_heap / 1024).toFixed(1) + 'KB</span>' +
-      '<span>Clients: ' + d.clients_online + '</span>';
+      '<span>Clients: ' + d.clients_online + '</span>' +
+      flashHtml;
     setError('');
     fetchCount = 0;
   } catch (e) {
@@ -439,6 +499,12 @@ async function showDetail(id) {
   document.getElementById('metrics').innerHTML = '<span class="loading">Loading data...</span>';
   currentData = null;
   document.getElementById('basic-mode-row').style.display = 'block';
+  document.getElementById('id-row').style.display = 'block';
+  const idInput = document.getElementById('id-input');
+  idInput.value = id;
+  const idStatus = document.getElementById('id-status');
+  idStatus.textContent = '';
+  idStatus.style.color = '#4CAF50';
 
   try {
     currentData = await fetchData(id, currentTimeRange);

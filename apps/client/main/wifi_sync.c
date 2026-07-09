@@ -24,6 +24,7 @@ static char s_client_id[32] = {0};
 #define CLIENT_NVS_NAMESPACE "client"
 #define CLIENT_NVS_KEY_NAME  "name"
 #define CLIENT_NVS_KEY_BASIC_MODE "basic_mode"
+#define CLIENT_NVS_KEY_ID   "id"
 
 static char s_server_url[128] = {0};
 static char s_server_ip[16] = {0};
@@ -31,6 +32,45 @@ static bool s_ip_resolved = false;
 static char s_assigned_name[32] = {0};
 static uint32_t s_sync_interval_sec = 600; /* default 10 minutes */
 static bool s_basic_mode = true;
+static bool s_id_changed = false;
+static char s_new_id[32] = {0};
+
+static void save_client_id_to_nvs(const char *id) {
+    nvs_handle handle;
+    esp_err_t err = nvs_open(CLIENT_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open failed: %d", err);
+        return;
+    }
+    err = nvs_set_str(handle, CLIENT_NVS_KEY_ID, id);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_set_str(id) failed: %d", err);
+    }
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_commit failed: %d", err);
+    }
+    nvs_close(handle);
+}
+
+static void load_client_id_from_nvs(const char *fallback, char *out, size_t out_sz) {
+    nvs_handle handle;
+    esp_err_t err = nvs_open(CLIENT_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        strncpy(out, fallback, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    size_t len = out_sz;
+    err = nvs_get_str(handle, CLIENT_NVS_KEY_ID, out, &len);
+    nvs_close(handle);
+    if (err == ESP_OK && out[0]) {
+        return;
+    }
+    strncpy(out, fallback, out_sz - 1);
+    out[out_sz - 1] = '\0';
+    save_client_id_to_nvs(out);
+}
 
 static void load_assigned_name_from_nvs(void) {
     nvs_handle handle;
@@ -112,12 +152,14 @@ static uint32_t get_broadcast_addr(void) {
 }
 
 esp_err_t wifi_sync_init(const char *client_id) {
-    strncpy(s_client_id, client_id, sizeof(s_client_id) - 1);
+    load_client_id_from_nvs(client_id, s_client_id, sizeof(s_client_id));
     s_server_ip[0] = '\0';
     s_ip_resolved = false;
     s_assigned_name[0] = '\0';
     s_sync_interval_sec = 600;
     s_basic_mode = true;
+    s_id_changed = false;
+    s_new_id[0] = '\0';
     load_assigned_name_from_nvs();
     load_basic_mode_from_nvs();
 #ifdef SERVER_IP
@@ -171,6 +213,8 @@ esp_err_t wifi_sync_discover_server(uint32_t timeout_ms) {
         ESP_LOGI(TAG, "Discovery broadcast #%d sent to %s", p + 1,
                  inet_ntoa(dest.sin_addr));
 
+        /* Use SO_RCVTIMEO instead of select() — select() hangs on broadcast
+         * UDP sockets in ESP8266 lwIP. */
         struct timeval tv;
         tv.tv_sec = per_probe_timeout / 1000;
         tv.tv_usec = (per_probe_timeout % 1000) * 1000;
@@ -195,6 +239,7 @@ esp_err_t wifi_sync_discover_server(uint32_t timeout_ms) {
                 return ESP_OK;
             }
         }
+        ESP_LOGD(TAG, "Discovery probe #%d no response", p + 1);
     }
 
     close(sock);
@@ -239,7 +284,10 @@ esp_err_t wifi_sync_connect_to_server(const char *ssid1, const char *pass1,
     if (ret != ESP_OK) {
 #ifdef SERVER_IP
         ESP_LOGW(TAG, "Server discovery failed, using fallback IP: %s", SERVER_IP);
+        strncpy(s_server_ip, SERVER_IP, sizeof(s_server_ip) - 1);
+        s_server_ip[sizeof(s_server_ip) - 1] = '\0';
         s_ip_resolved = true;
+        snprintf(s_server_url, sizeof(s_server_url), "http://%s/api/upload?id=%s", s_server_ip, s_client_id);
 #else
         ESP_LOGE(TAG, "Server discovery failed");
         return ESP_ERR_NOT_FOUND;
@@ -319,6 +367,24 @@ static void apply_server_config(cJSON *root) {
             ESP_LOGI(TAG, "Basic mode from server: %s", s_basic_mode ? "true" : "false");
         }
     }
+
+    cJSON *id_item = cJSON_GetObjectItem(root, "client_id");
+    if (id_item && cJSON_IsString(id_item)) {
+        const char *val = id_item->valuestring;
+        if (val && val[0] && strncmp(val, s_client_id, sizeof(s_client_id)) != 0) {
+            ESP_LOGI(TAG, "Client ID changed: '%s' -> '%s'", s_client_id, val);
+            strncpy(s_client_id, val, sizeof(s_client_id) - 1);
+            s_client_id[sizeof(s_client_id) - 1] = '\0';
+            save_client_id_to_nvs(s_client_id);
+            if (s_ip_resolved) {
+                snprintf(s_server_url, sizeof(s_server_url),
+                         "http://%s/api/upload?id=%s", s_server_ip, s_client_id);
+            }
+            s_id_changed = true;
+            strncpy(s_new_id, val, sizeof(s_new_id) - 1);
+            s_new_id[sizeof(s_new_id) - 1] = '\0';
+        }
+    }
 }
 
 esp_err_t wifi_sync_get_server_time(uint32_t *timestamp) {
@@ -382,7 +448,10 @@ esp_err_t wifi_sync_upload_unsynced(void) {
 
     static char json_buf[4096];
     int offset = 0;
-    offset += snprintf(json_buf + offset, sizeof(json_buf) - offset, "{\"readings\":[");
+    const char *assigned_name = s_assigned_name[0] ? s_assigned_name : "";
+    offset += snprintf(json_buf + offset, sizeof(json_buf) - offset,
+        "{\"id\":\"%s\",\"name\":\"%s\",\"readings\":[",
+        s_client_id, assigned_name);
 
     for (int i = 0; i < count; i++) {
         if (i > 0) offset += snprintf(json_buf + offset, sizeof(json_buf) - offset, ",");
@@ -472,4 +541,16 @@ uint32_t wifi_sync_get_sync_interval(void) {
 
 bool wifi_sync_is_basic_mode(void) {
     return s_basic_mode;
+}
+
+const char *wifi_sync_get_client_id(void) {
+    return s_client_id;
+}
+
+bool wifi_sync_take_id_change(char *out_id, size_t out_sz) {
+    if (!s_id_changed) return false;
+    strncpy(out_id, s_new_id, out_sz - 1);
+    out_id[out_sz - 1] = '\0';
+    s_id_changed = false;
+    return true;
 }

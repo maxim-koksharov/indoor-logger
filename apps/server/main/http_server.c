@@ -8,6 +8,7 @@
 #include <esp_log.h>
 #include <esp_http_server.h>
 #include <esp_system.h>
+#include <esp_spiffs.h>
 #include <cJSON.h>
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
@@ -284,10 +285,19 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
     }
 
     cJSON *records_array = NULL;
+    cJSON *meta_obj = cJSON_IsObject(root) ? root : NULL;
     if (cJSON_IsArray(root)) {
         records_array = root;
     } else {
         records_array = cJSON_GetObjectItem(root, "readings");
+    }
+
+    char client_name[CLIENT_REGISTRY_NAME_LEN] = {0};
+    if (meta_obj) {
+        cJSON *name_item = cJSON_GetObjectItem(meta_obj, "name");
+        if (name_item && cJSON_IsString(name_item) && name_item->valuestring) {
+            strncpy(client_name, name_item->valuestring, sizeof(client_name) - 1);
+        }
     }
 
     int count = 0;
@@ -328,12 +338,12 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
             if (!a) a = cJSON_GetObjectItem(item, "aqi");
             if (a && cJSON_IsNumber(a)) rec.aqi = (uint8_t)a->valuedouble;
 
-            if (data_store_append(client_id, &rec) != 0) {
-                ESP_LOGW(TAG, "Upload: append failed for record %d", count);
-                continue;
-            }
-            count++;
+    if (data_store_append(client_id, &rec) != 0) {
+            ESP_LOGW(TAG, "Upload: append failed for record %d", count);
+            continue;
         }
+        count++;
+    }
     } else {
         ESP_LOGW(TAG, "Upload: no readings array in JSON from %s", client_id);
     }
@@ -342,25 +352,34 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
 
     char client_ip[16] = {0};
     get_client_ip(req, client_ip, sizeof(client_ip));
-    client_registry_update(client_id, "", client_ip);
+    client_registry_update(client_id,
+                           client_name[0] ? client_name : NULL,
+                           client_ip);
     client_registry_save();
 
-    client_info_t *client = client_registry_get(client_id);
-    const char *client_name = (client && client->name[0]) ? client->name : "";
+    const char *resolved_id = client_registry_resolve_id(client_id);
+    bool id_changed = (strncmp(resolved_id, client_id, CLIENT_REGISTRY_ID_LEN) != 0);
+    if (id_changed) {
+        ESP_LOGI(TAG, "Upload: routed from old_id '%s' to '%s' via pending mapping",
+                 client_id, resolved_id);
+    }
+
+    client_info_t *client = client_registry_get(resolved_id);
+    const char *resp_name = (client && client->name[0]) ? client->name : "";
     uint32_t sync_interval = config_get_sync_interval();
     uint32_t ts = server_get_timestamp();
     const char *tz = config_get_timezone();
-    bool basic_mode = client_registry_get_basic_mode(client_id);
+    bool basic_mode = client_registry_get_basic_mode(resolved_id);
 
     char resp_buf[384];
     int resp_len = snprintf(resp_buf, sizeof(resp_buf),
-        "{\"status\":\"ok\",\"accepted\":%d,\"timestamp\":%lu,\"sync_interval\":%lu,\"name\":\"%s\",\"timezone\":\"%s\",\"basic_mode\":%s}",
-        count, (unsigned long)ts, (unsigned long)sync_interval, client_name, tz,
-        basic_mode ? "true" : "false");
+        "{\"status\":\"ok\",\"accepted\":%d,\"timestamp\":%lu,\"sync_interval\":%lu,\"name\":\"%s\",\"timezone\":\"%s\",\"basic_mode\":%s,\"client_id\":\"%s\"}",
+        count, (unsigned long)ts, (unsigned long)sync_interval, resp_name, tz,
+        basic_mode ? "true" : "false", resolved_id);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp_buf, resp_len);
-    ESP_LOGI(TAG, "Upload: accepted %d records from %s (name=%s, sync=%lu, ts=%lu, basic_mode=%s)",
-             count, client_id, client_name,
+    ESP_LOGI(TAG, "Upload: accepted %d records from %s (resolved=%s, name='%s', sync=%lu, ts=%lu, basic_mode=%s)",
+             count, client_id, resolved_id, resp_name,
              (unsigned long)sync_interval, (unsigned long)ts,
              basic_mode ? "true" : "false");
     return ESP_OK;
@@ -530,12 +549,117 @@ static esp_err_t client_name_get_handler(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    client_registry_update(client_id, name, NULL);
+    const char *resolved = client_registry_resolve_id(client_id);
+    if (client_registry_update(resolved, name, NULL) != 0) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
     client_registry_save();
-    ESP_LOGI(TAG, "Client %s renamed to: %s", client_id, name);
+    ESP_LOGI(TAG, "Client %s renamed to: %s", resolved, name);
 
-    char buf[64];
-    int n = snprintf(buf, sizeof(buf), "{\"id\":\"%s\",\"name\":\"%s\"}", client_id, name);
+    char buf[96];
+    int n = snprintf(buf, sizeof(buf), "{\"id\":\"%s\",\"name\":\"%s\"}", resolved, name);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static bool is_valid_digit_id(const char *s) {
+    if (!s || !*s) return false;
+    size_t len = strlen(s);
+    if (len == 0 || len >= CLIENT_REGISTRY_ID_LEN) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9') return false;
+    }
+    return true;
+}
+
+static esp_err_t client_id_post_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    char new_id[32] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    get_query_val(query, "new_id", new_id, sizeof(new_id));
+
+    if (client_id[0] == '\0' || new_id[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing id or new_id", 20);
+        return ESP_OK;
+    }
+
+    if (!is_valid_digit_id(new_id)) {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "invalid new_id (digits only, 1-31 chars)", 41);
+        return ESP_OK;
+    }
+
+    const char *resolved_old = client_registry_resolve_id(client_id);
+    if (client_registry_get(resolved_old) == NULL) {
+        httpd_resp_send_404(req);
+        return ESP_OK;
+    }
+    if (client_registry_get(new_id) != NULL) {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "new_id already exists", 21);
+        return ESP_OK;
+    }
+
+    if (client_registry_rename_id(resolved_old, new_id) != 0) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    if (data_store_rename_client(resolved_old, new_id) != 0) {
+        ESP_LOGW(TAG, "Rename: data migration failed for %s -> %s",
+                 resolved_old, new_id);
+    }
+    client_registry_save();
+
+    ESP_LOGI(TAG, "Client renamed: %s -> %s", resolved_old, new_id);
+
+    char buf[96];
+    int n = snprintf(buf, sizeof(buf), "{\"id\":\"%s\",\"new_id\":\"%s\"}", resolved_old, new_id);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t storage_get_handler(httpd_req_t *req) {
+    size_t total = 0, used = 0;
+    esp_err_t ret = esp_spiffs_info(NULL, &total, &used);
+    if (ret != ESP_OK) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+    size_t free_bytes = (used <= total) ? (total - used) : 0;
+    char buf[96];
+    int n = snprintf(buf, sizeof(buf),
+        "{\"total\":%u,\"used\":%u,\"free\":%u}",
+        (unsigned)total, (unsigned)used, (unsigned)free_bytes);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t client_delete_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+
+    if (client_id[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing id param", 15);
+        return ESP_OK;
+    }
+
+    if (client_registry_delete(client_id) != 0) {
+        httpd_resp_send_404(req);
+        return ESP_OK;
+    }
+
+    data_store_delete_client(client_id);
+
+    char buf[48];
+    int n = snprintf(buf, sizeof(buf), "{\"deleted\":\"%s\"}", client_id);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, n);
     return ESP_OK;
@@ -669,7 +793,7 @@ static esp_err_t data_aggregated_get_handler(httpd_req_t *req) {
 int http_server_init(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;
     config.max_open_sockets = 8;
     config.lru_purge_enable = true;
 
@@ -738,6 +862,27 @@ int http_server_start(void) {
         .handler = client_name_get_handler
     };
     httpd_register_uri_handler(server, &name_uri);
+
+    httpd_uri_t id_post_uri = {
+        .uri = "/api/client/id",
+        .method = HTTP_POST,
+        .handler = client_id_post_handler
+    };
+    httpd_register_uri_handler(server, &id_post_uri);
+
+    httpd_uri_t storage_uri = {
+        .uri = "/api/storage",
+        .method = HTTP_GET,
+        .handler = storage_get_handler
+    };
+    httpd_register_uri_handler(server, &storage_uri);
+
+    httpd_uri_t client_delete_uri = {
+        .uri = "/api/client",
+        .method = HTTP_DELETE,
+        .handler = client_delete_handler
+    };
+    httpd_register_uri_handler(server, &client_delete_uri);
 
     httpd_uri_t basic_mode_uri = {
         .uri = "/api/client/basic-mode",

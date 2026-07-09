@@ -318,6 +318,10 @@ esp_err_t wifi_manager_init_sta_dual(const char *ssid1, const char *pass1,
     if (!s_wifi_inited) {
         ESP_ERROR_CHECK(init_wifi_subsystem());
         s_wifi_inited = true;
+    } else if (esp_wifi_get_state() == WIFI_STATE_DEINIT) {
+        /* Previously deinit'd (e.g. before light sleep) — re-init subsystem. */
+        ESP_LOGI(TAG, "WiFi subsystem was deinit'd, re-initializing");
+        ESP_ERROR_CHECK(init_wifi_subsystem());
     }
 
     /* Scan and pick the network with the best RSSI. */

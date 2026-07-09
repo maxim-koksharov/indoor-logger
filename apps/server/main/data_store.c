@@ -214,6 +214,68 @@ int data_store_delete_client(const char *client_id) {
     return 0;
 }
 
+int data_store_rename_client(const char *old_id, const char *new_id) {
+    if (!old_id || !old_id[0] || !new_id || !new_id[0]) return -1;
+    if (strcmp(old_id, new_id) == 0) return 0;
+
+    char old_path[64], new_path[64];
+    get_filepath(old_id, old_path, sizeof(old_path));
+    get_filepath(new_id, new_path, sizeof(new_path));
+
+    FILE *f_old = fopen(old_path, "r");
+    if (f_old == NULL) {
+        ESP_LOGW(TAG, "Rename: no data file for %s", old_id);
+        return 0;
+    }
+
+    client_file_header_t header;
+    if (fread(&header, 1, sizeof(header), f_old) != sizeof(header) ||
+        header.magic != DATA_STORE_MAGIC) {
+        ESP_LOGE(TAG, "Rename: invalid header in %s", old_path);
+        fclose(f_old);
+        return -1;
+    }
+
+    FILE *f_new = fopen(new_path, "w+");
+    if (f_new == NULL) {
+        ESP_LOGE(TAG, "Rename: failed to create %s", new_path);
+        fclose(f_old);
+        return -1;
+    }
+
+    strncpy(header.client_id, new_id, sizeof(header.client_id) - 1);
+    header.client_id[sizeof(header.client_id) - 1] = '\0';
+
+    if (fwrite(&header, 1, sizeof(header), f_new) != sizeof(header)) {
+        ESP_LOGE(TAG, "Rename: failed to write header");
+        fclose(f_old);
+        fclose(f_new);
+        unlink(new_path);
+        return -1;
+    }
+
+    data_record_t rec;
+    while (fread(&rec, 1, sizeof(rec), f_old) == sizeof(rec)) {
+        if (fwrite(&rec, 1, sizeof(rec), f_new) != sizeof(rec)) {
+            ESP_LOGE(TAG, "Rename: failed to write record");
+            fclose(f_old);
+            fclose(f_new);
+            unlink(new_path);
+            return -1;
+        }
+    }
+
+    fclose(f_old);
+    fclose(f_new);
+
+    if (unlink(old_path) != 0) {
+        ESP_LOGW(TAG, "Rename: failed to delete old file %s", old_path);
+    }
+
+    ESP_LOGI(TAG, "Renamed data: %s -> %s", old_id, new_id);
+    return 0;
+}
+
 int data_store_read_aggregated(const char *client_id, uint32_t since_ts, uint32_t bucket_sec,
                                data_aggregated_t *out, uint32_t capacity) {
     if (capacity == 0 || bucket_sec == 0) return 0;

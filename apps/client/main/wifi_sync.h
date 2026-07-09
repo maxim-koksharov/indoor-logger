@@ -21,6 +21,15 @@ const char *wifi_sync_get_server_ip(void);
 const char *wifi_sync_get_assigned_name(void);
 uint32_t wifi_sync_get_sync_interval(void);
 bool wifi_sync_is_basic_mode(void);
+const char *wifi_sync_get_client_id(void);
+
+/** @brief Pop the pending client_id change (if any) pushed by the server.
+ *  @param out_id  Output buffer for the new ID.
+ *  @param out_sz  Size of @p out_id.
+ *  @return true if the ID changed since the last call (and the new ID is
+ *          copied to @p out_id), false otherwise.
+ */
+bool wifi_sync_take_id_change(char *out_id, size_t out_sz);
 
 #ifdef __cplusplus
 }

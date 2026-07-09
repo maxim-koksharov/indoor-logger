@@ -112,7 +112,31 @@ static uint32_t client_uptime_sec = 0;
 static int display_screen = 0;
 static uint32_t s_planned_sleep_ms = 0;
 static bool s_wifi_initialized = false;
+static TickType_t s_id_display_until = 0;
+static char s_id_display_str[32] = {0};
+
 static void update_display(void) {
+    TickType_t now_tick = xTaskGetTickCount();
+    if (s_id_display_until != 0 && now_tick < s_id_display_until) {
+        display_clear_fb(&display);
+        int scale = 3;
+        int len = strlen(s_id_display_str);
+        if (len * 6 * scale > 128) scale = 2;
+        if (len * 6 * scale > 128) scale = 1;
+        int char_w = 6 * scale;
+        int text_w = len * char_w;
+        int x = (128 - text_w) / 2;
+        if (x < 0) x = 0;
+        int y = (32 - 7 * scale) / 2;
+        display_draw_string_scaled(&display, display_font, x, y, s_id_display_str, scale);
+        display_present(&display);
+        return;
+    }
+    if (s_id_display_until != 0 && now_tick >= s_id_display_until) {
+        s_id_display_until = 0;
+        s_id_display_str[0] = '\0';
+    }
+
     display_clear_fb(&display);
 
     int t_int = (int)last_aht_data.temperature;
@@ -310,12 +334,35 @@ static esp_err_t client_bootstrap_wifi(void) {
 
 static esp_err_t client_perform_upload_cycle(bool from_button);
 
+static void client_check_id_change_and_show(void) {
+    char new_id[32];
+    if (!wifi_sync_take_id_change(new_id, sizeof(new_id))) return;
+    ESP_LOGI(TAG, "[ID] New client ID received: %s, showing on display for 5 sec", new_id);
+    strncpy(s_id_display_str, new_id, sizeof(s_id_display_str) - 1);
+    s_id_display_str[sizeof(s_id_display_str) - 1] = '\0';
+    s_id_display_until = xTaskGetTickCount() + pdMS_TO_TICKS(5000);
+    display_clear_fb(&display);
+    display_present(&display);
+    display_on(&display);
+    update_display();
+}
+
 static void client_turn_off_wifi_and_reset_state(TickType_t now) {
-    if (wifi_manager_is_connected() || wifi_sync_get_server_ip() != NULL) {
-        ESP_LOGI(TAG, "[WIFI] Stopping after upload cycle");
+    /* For light sleep on ESP8266, esp_wifi_get_state() must be < WIFI_STATE_START.
+     * esp_wifi_stop() leaves state in INIT. esp_wifi_deinit() leaves state in DEINIT.
+     * wifi_manager_init_sta_dual() will re-init if it sees state == DEINIT. */
+    if (esp_wifi_get_state() >= WIFI_STATE_START) {
         esp_err_t stop_ret = esp_wifi_stop();
         if (stop_ret != ESP_OK) {
             ESP_LOGW(TAG, "[WIFI] esp_wifi_stop() failed: %d", stop_ret);
+        }
+        int wait = 0;
+        while (esp_wifi_get_state() >= WIFI_STATE_START && wait < 50) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            wait++;
+        }
+        if (esp_wifi_get_state() == WIFI_STATE_INIT) {
+            esp_wifi_deinit();
         }
     }
 }
@@ -340,6 +387,7 @@ static esp_err_t client_perform_upload_cycle(bool from_button) {
     } else {
         ESP_LOGW(TAG, "[CYCLE] Upload failed: %d", ret);
     }
+    client_check_id_change_and_show();
     return ret;
 }
 
@@ -366,11 +414,13 @@ static void client_task(void *pvParameters) {
 
     display_off(&display);
 
-    ESP_LOGI(TAG, "[TASK] Client task started #%d (client_id=%s)", task_start_count, CONFIG_CLIENT_ID);
+    ESP_LOGI(TAG, "[TASK] Client task started #%d (client_id=%s)", task_start_count, wifi_sync_get_client_id() ? wifi_sync_get_client_id() : CONFIG_CLIENT_ID);
 
     while (1) {
         TickType_t now = xTaskGetTickCount();
         esp_task_wdt_reset();
+
+        client_check_id_change_and_show();
 
         bool button_pressed = button_is_pressed_debounced();
         if (button_pressed && !woke_by_button) {
@@ -413,6 +463,8 @@ static void client_task(void *pvParameters) {
                 last_screen_switch = now;
                 int max_screens = wifi_sync_is_basic_mode() ? 2 : 3;
                 display_on_until = now + pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS * max_screens);
+                display_clear_fb(&display);
+                display_present(&display);
                 display_on(&display);
                 update_display();
                 vTaskDelay(pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS));
@@ -513,6 +565,7 @@ static void client_task(void *pvParameters) {
                         ESP_LOGI(TAG, "[STATE] -> CONNECTED");
                         client_sync_time_with_server();
                         wifi_sync_upload_unsynced();
+                        client_check_id_change_and_show();
                         last_upload_attempt = now;
                     }
                 } else if (wifi_sync_get_server_ip() != NULL) {
@@ -522,6 +575,7 @@ static void client_task(void *pvParameters) {
                     ESP_LOGI(TAG, "[STATE] -> CONNECTED (server found)");
                     client_sync_time_with_server();
                     wifi_sync_upload_unsynced();
+                    client_check_id_change_and_show();
                     last_upload_attempt = now;
                 } else if ((now - state_entered) >= pdMS_TO_TICKS(CONFIG_CLIENT_DISCOVER_TIMEOUT_MS)) {
                     ESP_LOGW(TAG, "[STATE] DISCOVERING timeout, -> AUTONOMOUS");
@@ -544,6 +598,7 @@ static void client_task(void *pvParameters) {
                     if (ret == ESP_OK) {
                         client_sync_time_with_server();
                         ret = wifi_sync_upload_unsynced();
+                        client_check_id_change_and_show();
                     }
                     last_upload_attempt = now;
                     if (ret == ESP_OK) {
@@ -584,6 +639,8 @@ static void client_task(void *pvParameters) {
             local_display_screen = 0;
             display_screen = 0;
             last_screen_switch = now;
+            display_clear_fb(&display);
+            display_present(&display);
             display_on(&display);
             update_display();
             button_was_pressed();
@@ -627,7 +684,7 @@ static void client_task(void *pvParameters) {
                 }
             } else {
                 last_sleep_skip_logged = false;
-                if (state == STATE_AUTONOMOUS && s_wifi_initialized) {
+                if (0 && state == STATE_AUTONOMOUS && s_wifi_initialized) {
                     ESP_LOGI(TAG, "[WIFI] Stopping for light sleep");
                     esp_err_t stop_ret = esp_wifi_stop();
                     if (stop_ret != ESP_OK) {
@@ -739,6 +796,10 @@ void app_main(void) {
 
     vTaskDelay(pdMS_TO_TICKS(2000));
 
+    display_clear_fb(&display);
+    display_present(&display);
+    display_off(&display);
+
     // Self-test summary
     {
         size_t spiffs_total = 0, spiffs_used = 0;
@@ -757,7 +818,7 @@ void app_main(void) {
         ESP_LOGI(TAG, "  SPIFFS: %s (total=%u used=%u)",
                  spiffs_ret == ESP_OK ? "OK" : "FAIL", spiffs_total, spiffs_used);
         ESP_LOGI(TAG, "  Storage: %d records saved", storage_count);
-        ESP_LOGI(TAG, "  Client ID: %s", CONFIG_CLIENT_ID);
+        ESP_LOGI(TAG, "  Client ID: %s", wifi_sync_get_client_id() ? wifi_sync_get_client_id() : CONFIG_CLIENT_ID);
         ESP_LOGI(TAG, "  Primary SSID: %s", CLIENT_WIFI_SSID);
         if (strlen(CLIENT_WIFI_SSID_2) > 0) {
             ESP_LOGI(TAG, "  Secondary SSID: %s", CLIENT_WIFI_SSID_2);

@@ -79,6 +79,13 @@ uint32_t data_store_get_count(const char *client_id);
  */
 int data_store_delete_client(const char *client_id);
 
+/** @brief Rename a client's data file from old_id to new_id.
+ *  @param old_id Existing client identifier.
+ *  @param new_id New client identifier.
+ *  @return 0 on success, -1 on I/O error. Returns 0 if the old file does not exist.
+ */
+int data_store_rename_client(const char *old_id, const char *new_id);
+
 /** @brief A single aggregated data bucket (result of grouping raw records by time). */
 typedef struct {
     uint32_t timestamp;  /**< Bucket start timestamp (Unix seconds) */
