@@ -13,6 +13,7 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "esp_spiffs.h"
+#include "tcpip_adapter.h"
 #include "wifi_manager.h"
 #include "data_store.h"
 #include "client_registry.h"
@@ -88,6 +89,60 @@ static const char *get_effective_pass(void) {
     if (WIFI_PASS[0] != '\0') return WIFI_PASS;
 #endif
     return CONFIG_SERVER_STA_PASS;
+}
+
+/* Secondary SSID/pass. Priority: NVS (wifi:sta_ssid2 / wifi:sta_pass2) >
+ * wifi.env (WIFI_SSID_2 / WIFI_PASS_2) > Kconfig (CONFIG_SERVER_BACKUP_*).
+ * Returns NULL when no secondary is configured. */
+static const char *get_secondary_ssid(void) {
+    static char ssid[32] = "";
+    static char pass[64] = "";
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        nvs_handle_t nvs;
+        if (nvs_open("wifi", NVS_READONLY, &nvs) == ESP_OK) {
+            size_t len = sizeof(ssid);
+            if (nvs_get_str(nvs, "sta_ssid2", ssid, &len) == ESP_OK && ssid[0]) {
+                len = sizeof(pass);
+                nvs_get_str(nvs, "sta_pass2", pass, &len);
+            } else {
+                ssid[0] = '\0';
+            }
+            nvs_close(nvs);
+        }
+    }
+    if (ssid[0]) return ssid;
+#ifdef WIFI_SSID_2
+    if (WIFI_SSID_2[0] != '\0') return WIFI_SSID_2;
+#endif
+    if (strlen(CONFIG_SERVER_BACKUP_SSID) > 0) return CONFIG_SERVER_BACKUP_SSID;
+    return NULL;
+}
+
+static const char *get_secondary_pass(void) {
+    static char ssid[32] = "";
+    static char pass[64] = "";
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        nvs_handle_t nvs;
+        if (nvs_open("wifi", NVS_READONLY, &nvs) == ESP_OK) {
+            size_t len = sizeof(ssid);
+            if (nvs_get_str(nvs, "sta_ssid2", ssid, &len) == ESP_OK && ssid[0]) {
+                len = sizeof(pass);
+                nvs_get_str(nvs, "sta_pass2", pass, &len);
+            } else {
+                ssid[0] = '\0';
+            }
+            nvs_close(nvs);
+        }
+    }
+    if (ssid[0]) return pass;
+#ifdef WIFI_PASS_2
+    if (WIFI_PASS_2[0] != '\0') return WIFI_PASS_2;
+#endif
+    return CONFIG_SERVER_BACKUP_PASS;
 }
 
 void __attribute__((unused)) write_sta_creds(const char *ssid, const char *pass) {
@@ -295,15 +350,17 @@ void app_main(void) {
 
     const char *sta_ssid = get_effective_ssid();
     const char *sta_pass = get_effective_pass();
-    
+    const char *sta_ssid2 = get_secondary_ssid();
+    const char *sta_pass2 = get_secondary_pass();
+
     if (sta_ssid && strlen(sta_ssid) > 0) {
-        ESP_LOGI(TAG, "STA credentials found, will try connecting to: %s", sta_ssid);
-        ESP_ERROR_CHECK(wifi_manager_init_sta(sta_ssid, sta_pass));
-        
-        if (strlen(CONFIG_SERVER_BACKUP_SSID) > 0) {
-            wifi_manager_set_backup(CONFIG_SERVER_BACKUP_SSID, CONFIG_SERVER_BACKUP_PASS);
-            ESP_LOGI(TAG, "Backup WiFi configured: %s", CONFIG_SERVER_BACKUP_SSID);
+        if (sta_ssid2 && sta_ssid2[0]) {
+            ESP_LOGI(TAG, "STA dual-mode: '%s' <-> '%s' (RSSI-based selection)",
+                     sta_ssid, sta_ssid2);
+        } else {
+            ESP_LOGI(TAG, "STA credentials found, will try connecting to: %s", sta_ssid);
         }
+        ESP_ERROR_CHECK(wifi_manager_init_sta_dual(sta_ssid, sta_pass, sta_ssid2, sta_pass2));
         
         char ip_str[16] = {0};
         int retry = 0;
@@ -315,6 +372,24 @@ void app_main(void) {
         if (wifi_manager_is_connected()) {
             wifi_manager_get_ip(ip_str, sizeof(ip_str));
             ESP_LOGI(TAG, "STA connected, IP: %s", ip_str);
+#ifdef SERVER_STATIC_IP
+            {
+                tcpip_adapter_ip_info_t ip_info;
+                memset(&ip_info, 0, sizeof(ip_info));
+                ip_info.ip.addr = ipaddr_addr(SERVER_STATIC_IP);
+#ifdef SERVER_GATEWAY
+                ip_info.gw.addr = ipaddr_addr(SERVER_GATEWAY);
+#endif
+#ifdef SERVER_NETMASK
+                ip_info.netmask.addr = ipaddr_addr(SERVER_NETMASK);
+#endif
+                if (ip_info.ip.addr != 0) {
+                    ESP_ERROR_CHECK(tcpip_adapter_dhcpc_stop(TCPIP_ADAPTER_IF_STA));
+                    ESP_ERROR_CHECK(tcpip_adapter_set_ip_info(TCPIP_ADAPTER_IF_STA, &ip_info));
+                    ESP_LOGI(TAG, "Static IP applied: %s", SERVER_STATIC_IP);
+                }
+            }
+#endif
             init_sntp();
         } else {
             ESP_LOGW(TAG, "STA connection timeout, will retry in background");
@@ -363,9 +438,11 @@ void app_main(void) {
         } else {
             ESP_LOGI(TAG, "  STA: not configured");
         }
-        if (strlen(CONFIG_SERVER_BACKUP_SSID) > 0) {
-            ESP_LOGI(TAG, "  Backup SSID: %s", CONFIG_SERVER_BACKUP_SSID);
+        if (sta_ssid2 && sta_ssid2[0]) {
+            ESP_LOGI(TAG, "  Secondary SSID: %s", sta_ssid2);
         }
+        ESP_LOGI(TAG, "  Active SSID: %s",
+                 wifi_manager_is_connected() ? wifi_manager_get_current_ssid() : "(not connected)");
         ESP_LOGI(TAG, "  UDP discovery: port %d", UDP_DISCOVER_PORT);
         ESP_LOGI(TAG, "  Time source: %s", sntp_ok ? "NTP" : "uptime counter");
         if (wifi_manager_is_connected()) {

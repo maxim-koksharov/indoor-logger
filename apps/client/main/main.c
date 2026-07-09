@@ -26,8 +26,8 @@ static const char *TAG = "client";
 
 #define SENSOR_READ_INTERVAL_MS 300000
 #define WIFI_SYNC_INTERVAL_MS 300000
-#define DISPLAY_ON_MS 6000
-#define DISPLAY_SCREEN_INTERVAL_MS 3000
+#define DISPLAY_ON_MS 12000
+#define DISPLAY_SCREEN_INTERVAL_MS 4000
 
 #ifndef CONFIG_CLIENT_ID
 #define CONFIG_CLIENT_ID "test_client"
@@ -70,6 +70,20 @@ static const char *TAG = "client";
 #define CONFIG_CLIENT_BACKUP_PASS ""
 #endif
 
+/* Secondary SSID/pass. Priority: wifi.env (WIFI_SSID_2 / WIFI_PASS_2) >
+ * Kconfig backup (CONFIG_CLIENT_BACKUP_SSID / CONFIG_CLIENT_BACKUP_PASS). */
+#ifdef WIFI_SSID_2
+#define CLIENT_WIFI_SSID_2 WIFI_SSID_2
+#else
+#define CLIENT_WIFI_SSID_2 CONFIG_CLIENT_BACKUP_SSID
+#endif
+
+#ifdef WIFI_PASS_2
+#define CLIENT_WIFI_PASS_2 WIFI_PASS_2
+#else
+#define CLIENT_WIFI_PASS_2 CONFIG_CLIENT_BACKUP_PASS
+#endif
+
 #ifndef CONFIG_CLIENT_RETRY_INTERVAL_MS
 #define CONFIG_CLIENT_RETRY_INTERVAL_MS 3600000
 #endif
@@ -84,11 +98,6 @@ static TaskHandle_t client_task_handle = NULL;
 
 static aht21_data_t last_aht_data = {0};
 
-/* Set by wifi_sync.c when the server assigns a new name to this client. */
-bool g_name_updated = false;
-
-static uint32_t g_name_show_start_ms = 0;
-
 /* Client connection states. */
 typedef enum {
     STATE_DISCOVERING,
@@ -101,27 +110,6 @@ static uint32_t client_uptime_sec = 0;
 static int display_screen = 0;
 static void update_display(void) {
     display_clear_fb(&display);
-
-    /* Start showing the assigned name when it is first received. */
-    if (g_name_updated) {
-        g_name_updated = false;
-        g_name_show_start_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    }
-
-    uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    if (g_name_show_start_ms != 0 && (now_ms - g_name_show_start_ms) < 5000) {
-        const char *name = wifi_sync_get_assigned_name();
-        if (name && name[0]) {
-            int char_w = 12;
-            int w = strlen(name) * char_w;
-            int x = (w > 128) ? 0 : (128 - w) / 2;
-            display_draw_string_scaled(&display, display_font, x, 10, name, 2);
-            display_present(&display);
-            return;
-        }
-    } else {
-        g_name_show_start_ms = 0;
-    }
 
     int t_int = (int)last_aht_data.temperature;
     int t_dec = (int)(last_aht_data.temperature * 10) % 10;
@@ -142,12 +130,19 @@ static void update_display(void) {
         int w2 = strlen(line2) * 12;
         display_draw_string_scaled(&display, display_font, (128 - w1) / 2, 0, line1, 2);
         display_draw_string_scaled(&display, display_font, (128 - w2) / 2, 17, line2, 2);
-    } else {
+    } else if (display_screen == 1) {
         char line1[16], line2[16];
         snprintf(line1, sizeof(line1), "CO2 %u", last_ens_data.eco2);
         snprintf(line2, sizeof(line2), "VOC %u A%u", last_ens_data.tvoc, last_ens_data.aqi);
         display_draw_string_scaled(&display, display_font, 0, 0, line1, 2);
         display_draw_string_scaled(&display, display_font, 0, 17, line2, 2);
+    } else {
+        const char *name = wifi_sync_get_assigned_name();
+        const char *display_name = (name && name[0]) ? name : "not_defined";
+        int char_w = 12;
+        int w = strlen(display_name) * char_w;
+        int x = (w > 128) ? 0 : (128 - w) / 2;
+        display_draw_string_scaled(&display, display_font, x, 10, display_name, 2);
     }
     display_present(&display);
 }
@@ -261,10 +256,12 @@ static void client_task(void *pvParameters) {
         if (display_active) {
             if (now >= display_on_until) {
                 display_active = false;
+                local_display_screen = 0;
+                display_screen = 0;
                 display_off(&display);
                 ESP_LOGI(TAG, "[DISPLAY] Timeout, OFF");
             } else if ((now - last_screen_switch) >= pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS)) {
-                local_display_screen = !local_display_screen;
+                local_display_screen = (local_display_screen + 1) % 3;
                 display_screen = local_display_screen;
                 update_display();
                 last_screen_switch = now;
@@ -283,7 +280,8 @@ static void client_task(void *pvParameters) {
             case STATE_DISCOVERING:
                 if (!wifi_initialized) {
                     ESP_LOGI(TAG, "[STATE] DISCOVERING: starting WiFi");
-                    esp_err_t ret = wifi_sync_connect_to_server(CLIENT_WIFI_SSID, CLIENT_WIFI_PASS);
+                    esp_err_t ret = wifi_sync_connect_to_server(CLIENT_WIFI_SSID, CLIENT_WIFI_PASS,
+                                                                CLIENT_WIFI_SSID_2, CLIENT_WIFI_PASS_2);
                     wifi_initialized = true;
                     if (ret == ESP_OK) {
                         state = STATE_CONNECTED;
@@ -519,11 +517,6 @@ void app_main(void) {
         ESP_LOGE(TAG, "Failed to initialize WiFi sync");
     }
     
-    if (strlen(CONFIG_CLIENT_BACKUP_SSID) > 0) {
-        wifi_manager_set_backup(CONFIG_CLIENT_BACKUP_SSID, CONFIG_CLIENT_BACKUP_PASS);
-        ESP_LOGI(TAG, "Backup WiFi configured: %s", CONFIG_CLIENT_BACKUP_SSID);
-    }
-    
     ESP_LOGI(TAG, "Server discovery: UDP broadcast on port 5000");
 
     display_font = font_builtin_fonts[FONT_FACE_GLCD5x7];
@@ -555,6 +548,10 @@ void app_main(void) {
                  spiffs_ret == ESP_OK ? "OK" : "FAIL", spiffs_total, spiffs_used);
         ESP_LOGI(TAG, "  Storage: %d records saved", storage_count);
         ESP_LOGI(TAG, "  Client ID: %s", CONFIG_CLIENT_ID);
+        ESP_LOGI(TAG, "  Primary SSID: %s", CLIENT_WIFI_SSID);
+        if (strlen(CLIENT_WIFI_SSID_2) > 0) {
+            ESP_LOGI(TAG, "  Secondary SSID: %s", CLIENT_WIFI_SSID_2);
+        }
         ESP_LOGI(TAG, "  Time source: %s", (time(NULL) > 0) ? "server" : "none");
         ESP_LOGI(TAG, "  Heap at init: %d KB", (int)(esp_get_free_heap_size() / 1024));
         ESP_LOGI(TAG, "=== END SELF-TEST ===");

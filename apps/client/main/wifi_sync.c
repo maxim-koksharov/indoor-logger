@@ -10,6 +10,8 @@
 #include "lwip/inet.h"
 #include "tcpip_adapter.h"
 #include "cJSON.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,13 +21,46 @@
 static const char *TAG = "wifi_sync";
 static char s_client_id[32] = {0};
 
-/* Set from main.c to trigger a temporary name display on the OLED. */
-extern bool g_name_updated;
+#define CLIENT_NVS_NAMESPACE "client"
+#define CLIENT_NVS_KEY_NAME  "name"
+
 static char s_server_url[128] = {0};
 static char s_server_ip[16] = {0};
 static bool s_ip_resolved = false;
 static char s_assigned_name[32] = {0};
 static uint32_t s_sync_interval_sec = 600; /* default 10 minutes */
+
+static void load_assigned_name_from_nvs(void) {
+    nvs_handle handle;
+    esp_err_t err = nvs_open(CLIENT_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return;
+    }
+    size_t len = sizeof(s_assigned_name);
+    err = nvs_get_str(handle, CLIENT_NVS_KEY_NAME, s_assigned_name, &len);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Loaded assigned name from NVS: %s", s_assigned_name);
+    }
+    nvs_close(handle);
+}
+
+static void save_assigned_name_to_nvs(const char *name) {
+    nvs_handle handle;
+    esp_err_t err = nvs_open(CLIENT_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open failed: %d", err);
+        return;
+    }
+    err = nvs_set_str(handle, CLIENT_NVS_KEY_NAME, name);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_set_str failed: %d", err);
+    }
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_commit failed: %d", err);
+    }
+    nvs_close(handle);
+}
 
 #define DISCOVER_PORT 5000
 #define UPLOAD_BATCH_SIZE 50
@@ -47,6 +82,7 @@ esp_err_t wifi_sync_init(const char *client_id) {
     s_ip_resolved = false;
     s_assigned_name[0] = '\0';
     s_sync_interval_sec = 600;
+    load_assigned_name_from_nvs();
 #ifdef SERVER_IP
     strncpy(s_server_ip, SERVER_IP, sizeof(s_server_ip) - 1);
     s_ip_resolved = true;
@@ -129,12 +165,21 @@ esp_err_t wifi_sync_discover_server(uint32_t timeout_ms) {
     return ESP_ERR_TIMEOUT;
 }
 
-esp_err_t wifi_sync_connect_to_server(const char *ssid, const char *password) {
-    ESP_LOGI(TAG, "Connecting to WiFi: %s", ssid);
+esp_err_t wifi_sync_connect_to_server(const char *ssid1, const char *pass1,
+                                          const char *ssid2, const char *pass2) {
+    if (ssid1 && ssid1[0]) {
+        ESP_LOGI(TAG, "Connecting to WiFi: %s%s%s",
+                 ssid1,
+                 (ssid2 && ssid2[0]) ? " (alt: " : "",
+                 (ssid2 && ssid2[0]) ? ssid2 : "");
+        if (ssid2 && ssid2[0]) {
+            ESP_LOGI(TAG, "Alt SSID: %s", ssid2);
+        }
+    }
 
     s_ip_resolved = false;
 
-    esp_err_t ret = wifi_manager_init_sta(ssid, password);
+    esp_err_t ret = wifi_manager_init_sta_dual(ssid1, pass1, ssid2, pass2);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to connect to WiFi: %s", esp_err_to_name(ret));
         return ret;
@@ -213,7 +258,7 @@ static void apply_server_config(cJSON *root) {
         if (val && val[0]) {
             strncpy(s_assigned_name, val, sizeof(s_assigned_name) - 1);
             s_assigned_name[sizeof(s_assigned_name) - 1] = '\0';
-            g_name_updated = true;
+            save_assigned_name_to_nvs(s_assigned_name);
             ESP_LOGI(TAG, "Assigned name from server: %s", s_assigned_name);
         }
     }
