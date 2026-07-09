@@ -1,3 +1,11 @@
+# Build artefacts
+build/
+bin/
+sdkconfig*
+
+# Editor files
+.vscode/
+*.swp
 # Prerequisites
 *.d
 
@@ -39,3 +47,19 @@
 
 # debug information files
 *.dwo
+.docker_home/.bash_history
+
+#environment
+.env/
+.env*
+.opencode*
+
+# Runtime artefacts created inside the container bind-mount
+.docker_home/
+.opencode-home/
+.cache/
+.config/
+.local/
+
+# wifi data
+wifi.env

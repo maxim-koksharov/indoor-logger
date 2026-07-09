@@ -1,0 +1,33 @@
+menu "Server Configuration"
+
+    config SERVER_STA_SSID
+        string "Primary WiFi SSID"
+        default ""
+        help
+            Primary WiFi network SSID for the server to connect to.
+            If empty, the server will not attempt STA connection.
+            Credentials can also be stored in NVS (wifi:sta_ssid, wifi:sta_pass).
+
+    config SERVER_STA_PASS
+        string "Primary WiFi password"
+        default ""
+        help
+            Primary WiFi network password for the server to connect to.
+            Only used if SERVER_STA_SSID is not empty.
+            Credentials can also be stored in NVS (wifi:sta_ssid, wifi:sta_pass).
+
+    config SERVER_BACKUP_SSID
+        string "Backup WiFi SSID"
+        default ""
+        help
+            Backup WiFi SSID. If the primary network is unreachable after
+            3 consecutive retries, the server will switch to this SSID.
+            Leave empty to disable backup.
+
+    config SERVER_BACKUP_PASS
+        string "Backup WiFi password"
+        default ""
+        help
+            Backup WiFi network password.
+
+endmenu

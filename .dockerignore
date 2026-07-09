@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Build artefacts
+build/
+bin/
+sdkconfig
+sdkconfig.old
+*.o
+*.obj
+*.d
+*.so
+*.a
+*.lo
+*.la
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime artefacts from previous container runs
+.docker_home/
+.opencode-home/
+.cache/
+.config/
+.local/
+
+# Keep markdown for opencode instructions
+!*.md

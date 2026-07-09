@@ -1,0 +1,57 @@
+name: opencode-oneoff
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+  # Project root is mounted here
+  working_dir: /workspace
+
+  # Run as the host user so files created in the bind mount keep host ownership
+  user: "${UID:-1000}:${GID:-1000}"
+
+  # dialout (GID 20) is needed for /dev/ttyUSB* access on the host
+  group_add:
+    - "20"
+
+  # XDG paths are redirected inside the workspace so the non-root user
+  # can always write to them; the real configs from the host are bind-mounted below
+  environment:
+    - HOME=/workspace/.opencode-home
+    - XDG_CONFIG_HOME=/workspace/.opencode-home/.config
+    - XDG_DATA_HOME=/workspace/.opencode-home/.local/share
+    - XDG_CACHE_HOME=/workspace/.opencode-home/.cache
+
+  volumes:
+    # 1) Project source tree
+    - ".:/workspace:rw"
+
+    # 2) opencode: configs + license/auth from the host
+    - "${HOME}/.config/opencode:/workspace/.opencode-home/.config/opencode:rw"
+    - "${HOME}/.local/share/opencode:/workspace/.opencode-home/.local/share/opencode:rw"
+    - "${HOME}/.cache/opencode:/workspace/.opencode-home/.cache/opencode:rw"
+
+  # 3) USB programmer passthrough (CP2102 / CH340 / etc.)
+  devices:
+    - "/dev/ttyUSB0:/dev/ttyUSB0"
+    - "/dev/ttyUSB1:/dev/ttyUSB1"
+
+  # Allow esptool / idf.py monitor to manage tty devices
+  device_cgroup_rules:
+    - "c 188:* rmw"  # ttyUSB*
+    - "c 166:* rmw"  # ttyACM*
+
+  tty: true
+  stdin_open: true
+
+services:
+  # Interactive shell inside the container
+  bash:
+    <<: *common
+    command: ["bash"]
+
+  # opencode TUI inside the container
+  opencode:
+    <<: *common
+    command: ["opencode"]

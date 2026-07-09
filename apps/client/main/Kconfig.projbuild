@@ -1,0 +1,69 @@
+menu "Client Configuration"
+
+    config CLIENT_ID
+        string "Client device identifier"
+        default "test_client"
+        help
+            Unique identifier for this client device (e.g. living_room, kitchen).
+            Used as the client ID when uploading data to the server.
+
+    config CLIENT_DISPLAY_TIMEOUT_SEC
+        int "Display auto-off timeout (seconds)"
+        default 0
+        range 0 300
+        help
+            Time in seconds before the display turns off. Set to 0 for always-on.
+
+    config CLIENT_WIFI_SSID
+        string "Primary WiFi SSID"
+        default ""
+        help
+            Primary WiFi network SSID to connect to (same as server).
+            Must be the same network as the server is connected to.
+
+    config CLIENT_WIFI_PASS
+        string "Primary WiFi password"
+        default ""
+        help
+            Primary WiFi network password (same as server).
+
+    config CLIENT_BACKUP_SSID
+        string "Backup WiFi SSID"
+        default ""
+        help
+            Backup WiFi SSID. If the primary network is unreachable after
+            3 consecutive retries, the client will switch to this SSID.
+            Leave empty to disable backup.
+
+    config CLIENT_BACKUP_PASS
+        string "Backup WiFi password"
+        default ""
+        help
+            Backup WiFi network password.
+
+    config CLIENT_DISCOVER_TIMEOUT_MS
+        int "Server discovery timeout (ms)"
+        default 30000
+        range 5000 120000
+        help
+            Timeout in milliseconds for UDP broadcast discovery at boot.
+            Client broadcasts a discovery request and waits for server response.
+            If the server is not found, the client switches to autonomous mode.
+
+    config CLIENT_RETRY_INTERVAL_MS
+        int "Server retry interval in autonomous mode (ms)"
+        default 3600000
+        range 60000 86400000
+        help
+            How often the client tries to find the server again when running
+            autonomously (no server connection). Default is 1 hour.
+
+    config CLIENT_DEFAULT_SYNC_INTERVAL_SEC
+        int "Default sync interval when connected (sec)"
+        default 600
+        range 60 86400
+        help
+            Default interval between uploads when the client is connected to
+            the server. The server can override this value remotely.
+
+endmenu
