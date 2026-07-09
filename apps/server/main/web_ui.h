@@ -42,6 +42,20 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 .name-edit:focus { outline: none; border-color: #4CAF50; }
 .name-display { cursor: pointer; }
 .name-display:hover { color: #4CAF50; }
+.sync-settings { background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+.sync-settings label { margin-right: 10px; color: #888; }
+.sync-settings input { background: #333; color: #e0e0e0; border: 1px solid #555; padding: 6px 10px; width: 80px; font-family: inherit; border-radius: 4px; }
+.sync-settings button { background: #4CAF50; color: #fff; border: none; padding: 7px 14px; cursor: pointer; font-family: inherit; border-radius: 4px; margin-left: 10px; }
+.sync-settings button:disabled { background: #555; cursor: not-allowed; }
+.sync-settings #sync-status { margin-left: 10px; color: #4CAF50; }
+.timezone-settings { background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+.timezone-settings label { margin-right: 10px; color: #888; }
+.timezone-settings select, .timezone-settings input { background: #333; color: #e0e0e0; border: 1px solid #555; padding: 6px 10px; font-family: inherit; border-radius: 4px; }
+.timezone-settings select { width: 180px; }
+.timezone-settings input { width: 260px; }
+.timezone-settings button { background: #4CAF50; color: #fff; border: none; padding: 7px 14px; cursor: pointer; font-family: inherit; border-radius: 4px; margin-left: 10px; }
+.timezone-settings button:disabled { background: #555; cursor: not-allowed; }
+.timezone-settings #tz-status { margin-left: 10px; color: #4CAF50; }
 @media (max-width: 600px) {
   body { padding: 10px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
@@ -51,6 +65,26 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 <body>
 <h1>AirMon Server</h1>
 <div class="status" id="status"><span class="loading">Connecting...</span></div>
+<div class="sync-settings">
+  <label for="sync-input">Sync interval (sec):</label>
+  <input type="number" id="sync-input" min="60" max="86400" value="600">
+  <button id="sync-save" onclick="saveSyncInterval()">Save</button>
+  <span id="sync-status"></span>
+</div>
+<div class="timezone-settings">
+  <label for="tz-select">Timezone:</label>
+  <select id="tz-select" onchange="onTzSelectChange()">
+    <option value="WET0WEST,M3.5.0/1,M10.5.0/2">Lisbon (WET/WEST)</option>
+    <option value="UTC0">UTC</option>
+    <option value="EST5EDT,M3.2.0/2,M11.1.0/2">New York (EST/EDT)</option>
+    <option value="CET-1CEST,M3.5.0/2,M10.5.0/3">Berlin (CET/CEST)</option>
+    <option value="MSK-3">Moscow (MSK)</option>
+    <option value="custom">Custom...</option>
+  </select>
+  <input type="text" id="tz-input" value="WET0WEST,M3.5.0/1,M10.5.0/2" style="display:none">
+  <button id="tz-save" onclick="saveTimezone()">Save</button>
+  <span id="tz-status"></span>
+</div>
 <div id="error-bar"></div>
 <table id="clients">
 <thead><tr><th>Name</th><th>ID</th><th>Status</th><th>Records</th><th>Last Seen</th><th>IP</th></tr></thead>
@@ -77,6 +111,7 @@ let currentTimeRange = 24;
 let currentClientId = null;
 let lastError = '';
 let fetchCount = 0;
+let currentTimezone = 'WET0WEST,M3.5.0/1,M10.5.0/2';
 
 function editName() {
   var display = document.getElementById('name-display');
@@ -154,6 +189,115 @@ async function fetchStatus() {
   }
 }
 
+function onTzSelectChange() {
+  const select = document.getElementById('tz-select');
+  const input = document.getElementById('tz-input');
+  if (select.value === 'custom') {
+    input.style.display = 'inline';
+    input.value = currentTimezone;
+  } else {
+    input.style.display = 'none';
+    input.value = select.value;
+  }
+}
+
+async function loadTimezone() {
+  try {
+    const d = await fetchJSON('/api/timezone');
+    currentTimezone = d.timezone || 'WET0WEST,M3.5.0/1,M10.5.0/2';
+    const select = document.getElementById('tz-select');
+    const input = document.getElementById('tz-input');
+    let matched = false;
+    for (var i = 0; i < select.options.length; i++) {
+      if (select.options[i].value === currentTimezone) {
+        select.selectedIndex = i;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      select.value = 'custom';
+      input.style.display = 'inline';
+    } else {
+      input.style.display = 'none';
+    }
+    input.value = currentTimezone;
+  } catch (e) {
+    setError('Cannot load timezone: ' + e.message);
+  }
+}
+
+async function saveTimezone() {
+  const select = document.getElementById('tz-select');
+  const input = document.getElementById('tz-input');
+  const btn = document.getElementById('tz-save');
+  const status = document.getElementById('tz-status');
+  const value = (select.value === 'custom') ? input.value.trim() : select.value;
+  if (!value) {
+    status.textContent = 'Invalid timezone';
+    status.style.color = '#f44336';
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = 'Saving...';
+  status.style.color = '#888';
+  try {
+    const d = await fetchJSON('/api/timezone?value=' + encodeURIComponent(value));
+    currentTimezone = d.timezone;
+    status.textContent = 'Saved: ' + d.timezone;
+    status.style.color = '#4CAF50';
+  } catch (e) {
+    status.textContent = 'Failed: ' + e.message;
+    status.style.color = '#f44336';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function formatTime(ts) {
+  const dt = new Date(ts * 1000);
+  if (isNaN(dt.getTime())) return 'N/A';
+  try {
+    return dt.toLocaleTimeString('en-GB', { timeZone: currentTimezone });
+  } catch (e) {
+    return dt.toLocaleTimeString();
+  }
+}
+
+async function loadSyncInterval() {
+  try {
+    const d = await fetchJSON('/api/sync-interval');
+    document.getElementById('sync-input').value = d.sync_interval;
+  } catch (e) {
+    setError('Cannot load sync interval: ' + e.message);
+  }
+}
+
+async function saveSyncInterval() {
+  const input = document.getElementById('sync-input');
+  const btn = document.getElementById('sync-save');
+  const status = document.getElementById('sync-status');
+  const value = parseInt(input.value);
+  if (!value || value < 60 || value > 86400) {
+    status.textContent = 'Invalid value (60-86400)';
+    status.style.color = '#f44336';
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = 'Saving...';
+  status.style.color = '#888';
+  try {
+    const d = await fetchJSON('/api/sync-interval?value=' + value);
+    status.textContent = 'Saved: ' + d.sync_interval + ' sec';
+    status.style.color = '#4CAF50';
+  } catch (e) {
+    status.textContent = 'Failed: ' + e.message;
+    status.style.color = '#f44336';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function fetchClients() {
   try {
     const clients = await fetchJSON('/api/clients');
@@ -166,7 +310,6 @@ async function fetchClients() {
     clients.forEach(function(c) {
       const tr = document.createElement('tr');
       tr.onclick = function() { showDetail(c.id); };
-      const dt = new Date(c.last_seen * 1000);
       var statusClass = c.online ? 'online' : 'offline';
       var statusText = c.online ? 'ONLINE' : 'OFFLINE';
       tr.innerHTML =
@@ -174,7 +317,7 @@ async function fetchClients() {
         '<td style="color:#888;font-size:0.85em">' + (c.name ? c.id : '') + '</td>' +
         '<td class="' + statusClass + '">' + statusText + '</td>' +
         '<td>' + c.records + '</td>' +
-        '<td>' + (isNaN(dt.getTime()) ? 'N/A' : dt.toLocaleTimeString()) + '</td>' +
+        '<td>' + formatTime(c.last_seen) + '</td>' +
         '<td>' + (c.ip || 'N/A') + '</td>';
       tbody.appendChild(tr);
     });
@@ -330,6 +473,8 @@ async function setTimeRange(hours) {
 setInterval(function() { fetchStatus(); fetchClients(); }, 5000);
 fetchStatus();
 fetchClients();
+loadSyncInterval();
+loadTimezone();
 </script>
 </body>
 </html>

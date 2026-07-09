@@ -9,11 +9,36 @@
 #include <esp_http_server.h>
 #include <esp_system.h>
 #include <cJSON.h>
+#include "lwip/inet.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "http_server";
 static httpd_handle_t server = NULL;
 
 extern uint32_t server_get_timestamp(void);
+
+/* Minimal compatible accessors for the private httpd_req/socket structures
+ * in ESP-IDF v3.4, used only to retrieve the client's IP address. */
+struct sock_db_compat {
+    int fd;
+};
+
+struct httpd_req_aux_compat {
+    struct sock_db_compat *sd;
+};
+
+static void get_client_ip(httpd_req_t *req, char *ip_str, size_t ip_sz) {
+    ip_str[0] = '\0';
+    if (!req || !req->aux) return;
+    struct sock_db_compat *sd = ((struct httpd_req_aux_compat *)req->aux)->sd;
+    if (!sd) return;
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    if (getpeername(sd->fd, (struct sockaddr *)&addr, &len) == 0) {
+        strncpy(ip_str, inet_ntoa(addr.sin_addr), ip_sz - 1);
+        ip_str[ip_sz - 1] = '\0';
+    }
+}
 
 static void url_decode(char *dst, const char *src) {
     while (*src) {
@@ -304,14 +329,26 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
 
     cJSON_Delete(root);
 
-    client_registry_update(client_id, "", "");
+    char client_ip[16] = {0};
+    get_client_ip(req, client_ip, sizeof(client_ip));
+    client_registry_update(client_id, "", client_ip);
     client_registry_save();
 
-    char resp_buf[64];
-    int resp_len = snprintf(resp_buf, sizeof(resp_buf), "{\"accepted\":%d}", count);
+    client_info_t *client = client_registry_get(client_id);
+    const char *client_name = (client && client->name[0]) ? client->name : "";
+    uint32_t sync_interval = config_get_sync_interval();
+    uint32_t ts = server_get_timestamp();
+    const char *tz = config_get_timezone();
+
+    char resp_buf[320];
+    int resp_len = snprintf(resp_buf, sizeof(resp_buf),
+        "{\"status\":\"ok\",\"accepted\":%d,\"timestamp\":%lu,\"sync_interval\":%lu,\"name\":\"%s\",\"timezone\":\"%s\"}",
+        count, (unsigned long)ts, (unsigned long)sync_interval, client_name, tz);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp_buf, resp_len);
-    ESP_LOGI(TAG, "Upload: accepted %d records from %s", count, client_id);
+    ESP_LOGI(TAG, "Upload: accepted %d records from %s (name=%s, sync=%lu, ts=%lu)",
+             count, client_id, client_name,
+             (unsigned long)sync_interval, (unsigned long)ts);
     return ESP_OK;
 }
 
@@ -396,6 +433,73 @@ static esp_err_t data_get_handler(httpd_req_t *req) {
     httpd_resp_send_chunk(req, NULL, 0);
 
     free(records);
+    return ESP_OK;
+}
+
+static esp_err_t time_get_handler(httpd_req_t *req) {
+    char buf[64];
+    uint32_t ts = server_get_timestamp();
+    int n = snprintf(buf, sizeof(buf), "{\"timestamp\":%lu}", (unsigned long)ts);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t sync_interval_get_handler(httpd_req_t *req) {
+    char buf[64];
+    uint32_t interval = config_get_sync_interval();
+    int n = snprintf(buf, sizeof(buf), "{\"sync_interval\":%lu}", (unsigned long)interval);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t sync_interval_post_handler(httpd_req_t *req) {
+    char value_str[16] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "value", value_str, sizeof(value_str));
+    if (value_str[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing value param", 19);
+        return ESP_OK;
+    }
+    int value = atoi(value_str);
+    if (value <= 0) {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "invalid value", 13);
+        return ESP_OK;
+    }
+    config_save_sync_interval((uint32_t)value);
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "{\"ok\":true,\"sync_interval\":%d}", value);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t timezone_get_handler(httpd_req_t *req) {
+    const char *tz = config_get_timezone();
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "{\"timezone\":\"%s\"}", tz);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t timezone_post_handler(httpd_req_t *req) {
+    char value_str[80] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "value", value_str, sizeof(value_str));
+    if (value_str[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing value param", 19);
+        return ESP_OK;
+    }
+    config_save_timezone(value_str);
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "{\"ok\":true,\"timezone\":\"%s\"}", config_get_timezone());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
     return ESP_OK;
 }
 
@@ -487,7 +591,7 @@ static esp_err_t data_aggregated_get_handler(httpd_req_t *req) {
 int http_server_init(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 14;
     config.max_open_sockets = 8;
     config.lru_purge_enable = true;
 
@@ -557,6 +661,41 @@ int http_server_start(void) {
     };
     httpd_register_uri_handler(server, &name_uri);
 
-    ESP_LOGI(TAG, "HTTP server started with 8 endpoints");
+    httpd_uri_t time_uri = {
+        .uri = "/api/time",
+        .method = HTTP_GET,
+        .handler = time_get_handler
+    };
+    httpd_register_uri_handler(server, &time_uri);
+
+    httpd_uri_t sync_interval_uri = {
+        .uri = "/api/sync-interval",
+        .method = HTTP_GET,
+        .handler = sync_interval_get_handler
+    };
+    httpd_register_uri_handler(server, &sync_interval_uri);
+
+    httpd_uri_t sync_interval_post_uri = {
+        .uri = "/api/sync-interval",
+        .method = HTTP_POST,
+        .handler = sync_interval_post_handler
+    };
+    httpd_register_uri_handler(server, &sync_interval_post_uri);
+
+    httpd_uri_t timezone_uri = {
+        .uri = "/api/timezone",
+        .method = HTTP_GET,
+        .handler = timezone_get_handler
+    };
+    httpd_register_uri_handler(server, &timezone_uri);
+
+    httpd_uri_t timezone_post_uri = {
+        .uri = "/api/timezone",
+        .method = HTTP_POST,
+        .handler = timezone_post_handler
+    };
+    httpd_register_uri_handler(server, &timezone_post_uri);
+
+    ESP_LOGI(TAG, "HTTP server started with 12 endpoints");
     return 0;
 }

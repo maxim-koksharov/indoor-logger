@@ -23,8 +23,12 @@ static const char *TAG = "server";
 #define STALE_TIMEOUT_SEC 360
 #define MAIN_LOOP_INTERVAL_MS 30000
 #define UDP_DISCOVER_PORT 5000
+#define DEFAULT_SYNC_INTERVAL_SEC 600
+#define DEFAULT_TIMEZONE "WET0WEST,M3.5.0/1,M10.5.0/2"
 
 static uint32_t server_start_tick = 0;
+static uint32_t g_sync_interval = DEFAULT_SYNC_INTERVAL_SEC;
+static char g_timezone[64] = DEFAULT_TIMEZONE;
 
 uint32_t server_get_timestamp(void) {
     time_t now = time(NULL);
@@ -67,6 +71,25 @@ static const char *get_sta_pass(void) {
     return pass;
 }
 
+/* Priority: NVS > wifi.env compile definitions > Kconfig defaults */
+static const char *get_effective_ssid(void) {
+    const char *nvs_ssid = get_sta_ssid();
+    if (nvs_ssid && nvs_ssid[0] != '\0') return nvs_ssid;
+#ifdef WIFI_SSID
+    if (WIFI_SSID[0] != '\0') return WIFI_SSID;
+#endif
+    return CONFIG_SERVER_STA_SSID;
+}
+
+static const char *get_effective_pass(void) {
+    const char *nvs_pass = get_sta_pass();
+    if (nvs_pass && nvs_pass[0] != '\0') return nvs_pass;
+#ifdef WIFI_PASS
+    if (WIFI_PASS[0] != '\0') return WIFI_PASS;
+#endif
+    return CONFIG_SERVER_STA_PASS;
+}
+
 void __attribute__((unused)) write_sta_creds(const char *ssid, const char *pass) {
     nvs_handle_t nvs;
     if (nvs_open("wifi", NVS_READWRITE, &nvs) != ESP_OK) return;
@@ -77,8 +100,84 @@ void __attribute__((unused)) write_sta_creds(const char *ssid, const char *pass)
     ESP_LOGI(TAG, "STA credentials saved to NVS");
 }
 
+uint32_t config_get_sync_interval(void) {
+    return g_sync_interval;
+}
+
+void config_load_sync_interval(void) {
+    nvs_handle_t nvs;
+    if (nvs_open("config", NVS_READONLY, &nvs) != ESP_OK) {
+        g_sync_interval = DEFAULT_SYNC_INTERVAL_SEC;
+        return;
+    }
+    uint32_t value = DEFAULT_SYNC_INTERVAL_SEC;
+    esp_err_t err = nvs_get_u32(nvs, "sync_int", &value);
+    nvs_close(nvs);
+    if (err == ESP_OK && value > 0) {
+        g_sync_interval = value;
+    } else {
+        g_sync_interval = DEFAULT_SYNC_INTERVAL_SEC;
+    }
+}
+
+void config_save_sync_interval(uint32_t value) {
+    if (value == 0) value = DEFAULT_SYNC_INTERVAL_SEC;
+    g_sync_interval = value;
+    nvs_handle_t nvs;
+    if (nvs_open("config", NVS_READWRITE, &nvs) != ESP_OK) return;
+    esp_err_t err = nvs_set_u32(nvs, "sync_int", value);
+    if (err == ESP_OK) {
+        nvs_commit(nvs);
+        ESP_LOGI(TAG, "Sync interval saved: %u sec", value);
+    }
+    nvs_close(nvs);
+}
+
+static void apply_timezone(const char *tz) {
+    if (!tz || !tz[0]) return;
+    setenv("TZ", tz, 1);
+    tzset();
+    ESP_LOGI(TAG, "Timezone applied: %s", tz);
+}
+
+const char *config_get_timezone(void) {
+    return g_timezone;
+}
+
+void config_load_timezone(void) {
+    nvs_handle_t nvs;
+    if (nvs_open("config", NVS_READONLY, &nvs) != ESP_OK) {
+        strncpy(g_timezone, DEFAULT_TIMEZONE, sizeof(g_timezone) - 1);
+        g_timezone[sizeof(g_timezone) - 1] = '\0';
+        return;
+    }
+    size_t len = sizeof(g_timezone);
+    esp_err_t err = nvs_get_str(nvs, "timezone", g_timezone, &len);
+    nvs_close(nvs);
+    if (err != ESP_OK || g_timezone[0] == '\0') {
+        strncpy(g_timezone, DEFAULT_TIMEZONE, sizeof(g_timezone) - 1);
+        g_timezone[sizeof(g_timezone) - 1] = '\0';
+    }
+}
+
+void config_save_timezone(const char *tz) {
+    if (!tz || !tz[0]) tz = DEFAULT_TIMEZONE;
+    strncpy(g_timezone, tz, sizeof(g_timezone) - 1);
+    g_timezone[sizeof(g_timezone) - 1] = '\0';
+    apply_timezone(g_timezone);
+    nvs_handle_t nvs;
+    if (nvs_open("config", NVS_READWRITE, &nvs) != ESP_OK) return;
+    esp_err_t err = nvs_set_str(nvs, "timezone", g_timezone);
+    if (err == ESP_OK) {
+        nvs_commit(nvs);
+        ESP_LOGI(TAG, "Timezone saved: %s", g_timezone);
+    }
+    nvs_close(nvs);
+}
+
 static void init_sntp(void) {
     ESP_LOGI(TAG, "Initializing SNTP");
+    apply_timezone(config_get_timezone());
     sntp_setoperatingmode(SNTP_OPMODE_POLL);
     sntp_setservername(0, "pool.ntp.org");
     sntp_init();
@@ -95,7 +194,7 @@ static void init_sntp(void) {
     }
     
     if (timeinfo.tm_year >= (2020 - 1900)) {
-        ESP_LOGI(TAG, "SNTP synced: %s", asctime(&timeinfo));
+        ESP_LOGI(TAG, "SNTP synced (local): %s", asctime(&timeinfo));
     } else {
         ESP_LOGW(TAG, "SNTP sync failed, time may be inaccurate");
     }
@@ -179,6 +278,11 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
 
+    config_load_sync_interval();
+    ESP_LOGI(TAG, "Sync interval: %u sec", g_sync_interval);
+    config_load_timezone();
+    ESP_LOGI(TAG, "Timezone: %s", g_timezone);
+
     if (data_store_init() != 0) {
         ESP_LOGE(TAG, "Failed to init data store");
         return;
@@ -189,13 +293,8 @@ void app_main(void) {
     int loaded = client_registry_load();
     ESP_LOGI(TAG, "Client registry loaded %d clients", loaded);
 
-    const char *sta_ssid = get_sta_ssid();
-    const char *sta_pass = get_sta_pass();
-    
-    if (!sta_ssid || strlen(sta_ssid) == 0) {
-        sta_ssid = CONFIG_SERVER_STA_SSID;
-        sta_pass = CONFIG_SERVER_STA_PASS;
-    }
+    const char *sta_ssid = get_effective_ssid();
+    const char *sta_pass = get_effective_pass();
     
     if (sta_ssid && strlen(sta_ssid) > 0) {
         ESP_LOGI(TAG, "STA credentials found, will try connecting to: %s", sta_ssid);
