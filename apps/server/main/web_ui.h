@@ -56,6 +56,11 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 .timezone-settings button { background: #4CAF50; color: #fff; border: none; padding: 7px 14px; cursor: pointer; font-family: inherit; border-radius: 4px; margin-left: 10px; }
 .timezone-settings button:disabled { background: #555; cursor: not-allowed; }
 .timezone-settings #tz-status { margin-left: 10px; color: #4CAF50; }
+.basic-mode-settings { background: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
+.basic-mode-settings label { margin-right: 10px; color: #888; }
+.basic-mode-settings button { background: #333; color: #e0e0e0; border: 1px solid #555; padding: 7px 14px; cursor: pointer; font-family: inherit; border-radius: 4px; }
+.basic-mode-settings button.active { background: #4CAF50; color: #fff; border-color: #4CAF50; }
+.basic-mode-settings #basic-mode-status { margin-left: 10px; color: #4CAF50; }
 @media (max-width: 600px) {
   body { padding: 10px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
@@ -92,6 +97,11 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 </table>
 <div class="card" id="detail">
 <h2 id="detail-title"></h2>
+<div class="basic-mode-settings" id="basic-mode-row" style="display:none">
+  <label>Sensor mode:</label>
+  <button id="basic-mode-toggle" onclick="toggleBasicMode()">Loading...</button>
+  <span id="basic-mode-status"></span>
+</div>
 <div class="metrics" id="metrics"><span class="loading">Select a client to view data</span></div>
 <div class="controls" id="controls">
   <button onclick="setTimeRange(24)" class="active">24h</button>
@@ -101,9 +111,9 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
 </div>
 <div class="chart-box"><h3>Temperature (&deg;C)</h3><canvas id="ch-temp"></canvas></div>
 <div class="chart-box"><h3>Humidity (%)</h3><canvas id="ch-hum"></canvas></div>
-<div class="chart-box"><h3>eCO2 (ppm)</h3><canvas id="ch-eco2"></canvas></div>
-<div class="chart-box"><h3>TVOC (ppb)</h3><canvas id="ch-tvoc"></canvas></div>
-<div class="chart-box"><h3>AQI</h3><canvas id="ch-aqi"></canvas></div>
+<div class="chart-box" id="row-eco2"><h3>eCO2 (ppm)</h3><canvas id="ch-eco2"></canvas></div>
+<div class="chart-box" id="row-tvoc"><h3>TVOC (ppb)</h3><canvas id="ch-tvoc"></canvas></div>
+<div class="chart-box" id="row-aqi"><h3>AQI</h3><canvas id="ch-aqi"></canvas></div>
 </div>
 <script>
 let currentData = null;
@@ -112,6 +122,7 @@ let currentClientId = null;
 let lastError = '';
 let fetchCount = 0;
 let currentTimezone = 'WET0WEST,M3.5.0/1,M10.5.0/2';
+let currentBasicMode = true;
 
 function editName() {
   var display = document.getElementById('name-display');
@@ -157,11 +168,13 @@ function setError(msg) {
   }
 }
 
-async function fetchJSON(url) {
+async function fetchJSON(url, method) {
   const controller = new AbortController();
   const timer = setTimeout(function() { controller.abort(); }, 8000);
   try {
-    const r = await fetch(url, { signal: controller.signal });
+    var opts = { signal: controller.signal };
+    if (method) opts.method = method;
+    const r = await fetch(url, opts);
     clearTimeout(timer);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return await r.json();
@@ -330,9 +343,12 @@ function drawAllCharts() {
   if (!currentData || currentData.length === 0) return;
   var since = Math.floor(Date.now() / 1000) - currentTimeRange * 3600;
   var filtered = currentData.filter(function(d) { return d.timestamp >= since; });
+  var ids = ['ch-temp', 'ch-hum', 'ch-eco2', 'ch-tvoc', 'ch-aqi'];
+  var visibleIds = currentBasicMode
+    ? ids.filter(function(id) { return id === 'ch-temp' || id === 'ch-hum'; })
+    : ids;
   if (filtered.length < 2) {
-    var ids = ['ch-temp', 'ch-hum', 'ch-eco2', 'ch-tvoc', 'ch-aqi'];
-    ids.forEach(function(id) {
+    visibleIds.forEach(function(id) {
       var canvas = document.getElementById(id);
       var ctx = canvas.getContext('2d');
       if (canvas.offsetWidth > 0) canvas.width = canvas.offsetWidth;
@@ -347,9 +363,11 @@ function drawAllCharts() {
   }
   drawChart('ch-temp', filtered, 'temp', 'Temperature', '°C', '#4CAF50');
   drawChart('ch-hum', filtered, 'hum', 'Humidity', '%', '#2196F3');
-  drawChart('ch-eco2', filtered, 'eco2', 'eCO2', ' ppm', '#FFC107');
-  drawChart('ch-tvoc', filtered, 'tvoc', 'TVOC', ' ppb', '#FF9800');
-  drawChart('ch-aqi', filtered, 'aqi', 'AQI', '', '#9C27B0');
+  if (!currentBasicMode) {
+    drawChart('ch-eco2', filtered, 'eco2', 'eCO2', ' ppm', '#FFC107');
+    drawChart('ch-tvoc', filtered, 'tvoc', 'TVOC', ' ppb', '#FF9800');
+    drawChart('ch-aqi', filtered, 'aqi', 'AQI', '', '#9C27B0');
+  }
 }
 
 function drawChart(canvasId, data, key, label, unit, color) {
@@ -420,11 +438,15 @@ async function showDetail(id) {
   document.getElementById('detail').style.display = 'block';
   document.getElementById('metrics').innerHTML = '<span class="loading">Loading data...</span>';
   currentData = null;
+  document.getElementById('basic-mode-row').style.display = 'block';
 
   try {
     currentData = await fetchData(id, currentTimeRange);
     var clientPromise = fetchJSON('/api/client?id=' + encodeURIComponent(id));
     var d = await clientPromise;
+
+    currentBasicMode = (d.basic_mode === undefined) ? true : !!d.basic_mode;
+    renderBasicModeUI();
 
     document.getElementById('detail-title').innerHTML = '<span class="name-display" id="name-display" onclick="editName()">' + (d.name || d.id) + ' &nbsp;&#9998;</span><span id="name-editor" style="display:none"></span>';
 
@@ -432,19 +454,61 @@ async function showDetail(id) {
     var metrics = document.getElementById('metrics');
 
     if (latest) {
-      metrics.innerHTML =
+      var html =
         '<div class="metric"><div class="label">Temperature</div><div class="value">' + latest.temp.toFixed(1) + '&deg;C</div></div>' +
-        '<div class="metric"><div class="label">Humidity</div><div class="value">' + latest.hum.toFixed(1) + '%</div></div>' +
-        '<div class="metric"><div class="label">eCO2</div><div class="value">' + latest.eco2 + ' ppm</div></div>' +
-        '<div class="metric"><div class="label">TVOC</div><div class="value">' + latest.tvoc + ' ppb</div></div>' +
-        '<div class="metric"><div class="label">AQI</div><div class="value aqi-' + latest.aqi + '">' + latest.aqi + '</div></div>';
+        '<div class="metric"><div class="label">Humidity</div><div class="value">' + latest.hum.toFixed(1) + '%</div></div>';
+      if (!currentBasicMode) {
+        html +=
+          '<div class="metric"><div class="label">eCO2</div><div class="value">' + latest.eco2 + ' ppm</div></div>' +
+          '<div class="metric"><div class="label">TVOC</div><div class="value">' + latest.tvoc + ' ppb</div></div>' +
+          '<div class="metric"><div class="label">AQI</div><div class="value aqi-' + latest.aqi + '">' + latest.aqi + '</div></div>';
+      }
+      metrics.innerHTML = html;
     } else {
       metrics.innerHTML = '<span class="waiting">No data yet for ' + id + '</span>';
     }
 
+    document.getElementById('row-eco2').style.display = currentBasicMode ? 'none' : 'block';
+    document.getElementById('row-tvoc').style.display = currentBasicMode ? 'none' : 'block';
+    document.getElementById('row-aqi').style.display = currentBasicMode ? 'none' : 'block';
+
     drawAllCharts();
   } catch (e) {
     document.getElementById('metrics').innerHTML = '<span class="error-msg">Failed to load data for ' + id + ': ' + e.message + '</span>';
+  }
+}
+
+function renderBasicModeUI() {
+  var btn = document.getElementById('basic-mode-toggle');
+  btn.textContent = currentBasicMode ? 'Basic (T+H only)' : 'Full (all sensors)';
+  btn.className = currentBasicMode ? 'active' : '';
+  document.getElementById('basic-mode-status').textContent = '';
+  document.getElementById('basic-mode-status').style.color = '#888';
+}
+
+async function toggleBasicMode() {
+  if (!currentClientId) return;
+  var btn = document.getElementById('basic-mode-toggle');
+  var status = document.getElementById('basic-mode-status');
+  var newValue = !currentBasicMode;
+  btn.disabled = true;
+  status.textContent = 'Saving...';
+  status.style.color = '#888';
+  try {
+    var r = await fetchJSON('/api/client/basic-mode?id=' + encodeURIComponent(currentClientId) + '&value=' + (newValue ? 1 : 0), 'POST');
+    currentBasicMode = !!r.basic_mode;
+    renderBasicModeUI();
+    status.textContent = 'Saved: ' + (currentBasicMode ? 'Basic (T+H)' : 'Full');
+    status.style.color = '#4CAF50';
+    document.getElementById('row-eco2').style.display = currentBasicMode ? 'none' : 'block';
+    document.getElementById('row-tvoc').style.display = currentBasicMode ? 'none' : 'block';
+    document.getElementById('row-aqi').style.display = currentBasicMode ? 'none' : 'block';
+    showDetail(currentClientId);
+  } catch (e) {
+    status.textContent = 'Failed: ' + e.message;
+    status.style.color = '#f44336';
+  } finally {
+    btn.disabled = false;
   }
 }
 

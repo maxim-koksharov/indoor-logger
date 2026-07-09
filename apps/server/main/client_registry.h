@@ -53,6 +53,20 @@ int client_registry_get_all(client_info_t *out, int capacity);
  */
 void client_registry_check_stale(uint32_t timeout_sec);
 
+/** @brief Get the basic-mode flag for a client.
+ *  @param id Client identifier.
+ *  @return true if the client is in basic mode (temp+humidity only), false otherwise.
+ *          Returns true by default for unknown clients.
+ */
+bool client_registry_get_basic_mode(const char *id);
+
+/** @brief Set the basic-mode flag for a client.
+ *  @param id    Client identifier.
+ *  @param value true to enable basic mode, false to disable.
+ *  @return 0 on success, -1 if the client is not found.
+ */
+int client_registry_set_basic_mode(const char *id, bool value);
+
 /** @brief Save the registry to NVS for persistence across reboots.
  *  @return 0 on success, -1 on NVS error.
  */

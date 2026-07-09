@@ -20,6 +20,7 @@ bool wifi_sync_is_connected(void);
 const char *wifi_sync_get_server_ip(void);
 const char *wifi_sync_get_assigned_name(void);
 uint32_t wifi_sync_get_sync_interval(void);
+bool wifi_sync_is_basic_mode(void);
 
 #ifdef __cplusplus
 }

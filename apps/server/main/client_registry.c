@@ -7,12 +7,14 @@
 
 static const char *TAG = "client_registry";
 static client_info_t clients[CLIENT_REGISTRY_MAX_CLIENTS];
+static bool basic_modes[CLIENT_REGISTRY_MAX_CLIENTS];
 static int client_count = 0;
 
 extern uint32_t server_get_timestamp(void);
 
 int client_registry_init(void) {
     memset(clients, 0, sizeof(clients));
+    memset(basic_modes, 1, sizeof(basic_modes));
     client_count = 0;
     return 0;
 }
@@ -27,6 +29,8 @@ int client_registry_update(const char *id, const char *name, const char *ip) {
         }
         c = &clients[client_count++];
         strncpy(c->id, id, CLIENT_REGISTRY_ID_LEN - 1);
+        int idx = (int)(c - clients);
+        basic_modes[idx] = true;
     }
     
     if (name && name[0]) {
@@ -50,6 +54,28 @@ client_info_t *client_registry_get(const char *id) {
         }
     }
     return NULL;
+}
+
+bool client_registry_get_basic_mode(const char *id) {
+    for (int i = 0; i < client_count; i++) {
+        if (strncmp(clients[i].id, id, CLIENT_REGISTRY_ID_LEN) == 0) {
+            return basic_modes[i];
+        }
+    }
+    return true;
+}
+
+int client_registry_set_basic_mode(const char *id, bool value) {
+    for (int i = 0; i < client_count; i++) {
+        if (strncmp(clients[i].id, id, CLIENT_REGISTRY_ID_LEN) == 0) {
+            if (basic_modes[i] != value) {
+                basic_modes[i] = value;
+                ESP_LOGI(TAG, "Client %s basic_mode = %s", id, value ? "true" : "false");
+            }
+            return 0;
+        }
+    }
+    return -1;
 }
 
 int client_registry_get_all(client_info_t *out, int capacity) {
@@ -84,6 +110,13 @@ int client_registry_save(void) {
         nvs_close(handle);
         return -1;
     }
+
+    err = nvs_set_blob(handle, "basic_modes", basic_modes, sizeof(basic_modes));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save basic_modes: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return -1;
+    }
     
     err = nvs_set_i32(handle, "count", client_count);
     if (err != ESP_OK) {
@@ -109,6 +142,7 @@ int client_registry_load(void) {
     esp_err_t err = nvs_open("client_reg", NVS_READONLY, &handle);
     if (err != ESP_OK) {
         ESP_LOGI(TAG, "No saved registry in NVS");
+        memset(basic_modes, 1, sizeof(basic_modes));
         return 0;
     }
     
@@ -116,6 +150,7 @@ int client_registry_load(void) {
     err = nvs_get_blob(handle, "clients", clients, &len);
     if (err != ESP_OK || len != sizeof(clients)) {
         ESP_LOGW(TAG, "Failed to load clients: %s", esp_err_to_name(err));
+        memset(basic_modes, 1, sizeof(basic_modes));
         nvs_close(handle);
         return 0;
     }
@@ -124,6 +159,13 @@ int client_registry_load(void) {
     err = nvs_get_i32(handle, "count", &count);
     if (err == ESP_OK && count > 0 && count <= CLIENT_REGISTRY_MAX_CLIENTS) {
         client_count = count;
+    }
+
+    len = sizeof(basic_modes);
+    err = nvs_get_blob(handle, "basic_modes", basic_modes, &len);
+    if (err != ESP_OK || len != sizeof(basic_modes)) {
+        ESP_LOGI(TAG, "No saved basic_modes, defaulting all to true");
+        memset(basic_modes, 1, sizeof(basic_modes));
     }
     
     nvs_close(handle);

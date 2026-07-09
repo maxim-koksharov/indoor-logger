@@ -23,12 +23,14 @@ static char s_client_id[32] = {0};
 
 #define CLIENT_NVS_NAMESPACE "client"
 #define CLIENT_NVS_KEY_NAME  "name"
+#define CLIENT_NVS_KEY_BASIC_MODE "basic_mode"
 
 static char s_server_url[128] = {0};
 static char s_server_ip[16] = {0};
 static bool s_ip_resolved = false;
 static char s_assigned_name[32] = {0};
 static uint32_t s_sync_interval_sec = 600; /* default 10 minutes */
+static bool s_basic_mode = true;
 
 static void load_assigned_name_from_nvs(void) {
     nvs_handle handle;
@@ -62,6 +64,39 @@ static void save_assigned_name_to_nvs(const char *name) {
     nvs_close(handle);
 }
 
+static void load_basic_mode_from_nvs(void) {
+    nvs_handle handle;
+    esp_err_t err = nvs_open(CLIENT_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return;
+    }
+    uint8_t val = 1;
+    err = nvs_get_u8(handle, CLIENT_NVS_KEY_BASIC_MODE, &val);
+    nvs_close(handle);
+    if (err == ESP_OK) {
+        s_basic_mode = (val != 0);
+        ESP_LOGI(TAG, "Loaded basic_mode from NVS: %s", s_basic_mode ? "true" : "false");
+    }
+}
+
+static void save_basic_mode_to_nvs(bool value) {
+    nvs_handle handle;
+    esp_err_t err = nvs_open(CLIENT_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open failed: %d", err);
+        return;
+    }
+    err = nvs_set_u8(handle, CLIENT_NVS_KEY_BASIC_MODE, value ? 1 : 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_set_u8 failed: %d", err);
+    }
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_commit failed: %d", err);
+    }
+    nvs_close(handle);
+}
+
 #define DISCOVER_PORT 5000
 #define UPLOAD_BATCH_SIZE 50
 
@@ -82,7 +117,9 @@ esp_err_t wifi_sync_init(const char *client_id) {
     s_ip_resolved = false;
     s_assigned_name[0] = '\0';
     s_sync_interval_sec = 600;
+    s_basic_mode = true;
     load_assigned_name_from_nvs();
+    load_basic_mode_from_nvs();
 #ifdef SERVER_IP
     strncpy(s_server_ip, SERVER_IP, sizeof(s_server_ip) - 1);
     s_ip_resolved = true;
@@ -272,6 +309,16 @@ static void apply_server_config(cJSON *root) {
             ESP_LOGI(TAG, "Timezone from server: %s", val);
         }
     }
+
+    cJSON *bm = cJSON_GetObjectItem(root, "basic_mode");
+    if (bm && cJSON_IsBool(bm)) {
+        bool new_val = cJSON_IsTrue(bm);
+        if (new_val != s_basic_mode) {
+            s_basic_mode = new_val;
+            save_basic_mode_to_nvs(s_basic_mode);
+            ESP_LOGI(TAG, "Basic mode from server: %s", s_basic_mode ? "true" : "false");
+        }
+    }
 }
 
 esp_err_t wifi_sync_get_server_time(uint32_t *timestamp) {
@@ -296,11 +343,16 @@ esp_err_t wifi_sync_get_server_time(uint32_t *timestamp) {
                 cJSON *ts = cJSON_GetObjectItem(root, "timestamp");
                 if (ts && cJSON_IsNumber(ts)) {
                     *timestamp = (uint32_t)ts->valuedouble;
+                    ESP_LOGI(TAG, "Server time fetched: %lu", (unsigned long)*timestamp);
+                } else {
+                    ESP_LOGW(TAG, "Server time response missing 'timestamp'");
                 }
                 cJSON_Delete(root);
             }
             free(buf);
         }
+    } else {
+        ESP_LOGW(TAG, "Server time fetch failed: ret=%d", ret);
     }
     esp_http_client_cleanup(client);
     return ret;
@@ -337,18 +389,20 @@ esp_err_t wifi_sync_upload_unsynced(void) {
         int t_int = (int)records[i].temperature;
         int t_dec = (int)(records[i].temperature * 10) % 10;
         if (t_dec < 0) t_dec = -t_dec;
+        if (s_basic_mode) {
+            offset += snprintf(json_buf + offset, sizeof(json_buf) - offset,
+                "{\"ts\":%ld,\"up\":%u,\"t\":%d.%d,\"h\":%d}",
+                (long)records[i].timestamp, records[i].uptime_sec,
+                t_int, t_dec, (int)records[i].humidity);
 #if ENS160_ENABLE
-        offset += snprintf(json_buf + offset, sizeof(json_buf) - offset,
-            "{\"ts\":%ld,\"up\":%u,\"t\":%d.%d,\"h\":%d,\"c\":%u,\"v\":%u,\"a\":%u}",
-            (long)records[i].timestamp, records[i].uptime_sec,
-            t_int, t_dec, (int)records[i].humidity,
-            records[i].eco2, records[i].tvoc, records[i].aqi);
-#else
-        offset += snprintf(json_buf + offset, sizeof(json_buf) - offset,
-            "{\"ts\":%ld,\"up\":%u,\"t\":%d.%d,\"h\":%d}",
-            (long)records[i].timestamp, records[i].uptime_sec,
-            t_int, t_dec, (int)records[i].humidity);
+        } else {
+            offset += snprintf(json_buf + offset, sizeof(json_buf) - offset,
+                "{\"ts\":%ld,\"up\":%u,\"t\":%d.%d,\"h\":%d,\"c\":%u,\"v\":%u,\"a\":%u}",
+                (long)records[i].timestamp, records[i].uptime_sec,
+                t_int, t_dec, (int)records[i].humidity,
+                records[i].eco2, records[i].tvoc, records[i].aqi);
 #endif
+        }
     }
 
     offset += snprintf(json_buf + offset, sizeof(json_buf) - offset, "]}");
@@ -414,4 +468,8 @@ const char *wifi_sync_get_assigned_name(void) {
 
 uint32_t wifi_sync_get_sync_interval(void) {
     return s_sync_interval_sec;
+}
+
+bool wifi_sync_is_basic_mode(void) {
+    return s_basic_mode;
 }

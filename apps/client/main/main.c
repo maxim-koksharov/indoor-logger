@@ -8,12 +8,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "driver/i2c.h"
+#include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "esp_task_wdt.h"
 #include "esp_spiffs.h"
@@ -108,12 +110,16 @@ static ens160_data_t last_ens_data = {0};
 
 static uint32_t client_uptime_sec = 0;
 static int display_screen = 0;
+static uint32_t s_planned_sleep_ms = 0;
+static bool s_wifi_initialized = false;
 static void update_display(void) {
     display_clear_fb(&display);
 
     int t_int = (int)last_aht_data.temperature;
     int t_dec = (int)(last_aht_data.temperature * 10) % 10;
     if (t_dec < 0) t_dec = -t_dec;
+
+    bool basic_mode = wifi_sync_is_basic_mode();
 
     if (display_screen == 0) {
         char line1[16], line2[16];
@@ -131,11 +137,20 @@ static void update_display(void) {
         display_draw_string_scaled(&display, display_font, (128 - w1) / 2, 0, line1, 2);
         display_draw_string_scaled(&display, display_font, (128 - w2) / 2, 17, line2, 2);
     } else if (display_screen == 1) {
-        char line1[16], line2[16];
-        snprintf(line1, sizeof(line1), "CO2 %u", last_ens_data.eco2);
-        snprintf(line2, sizeof(line2), "VOC %u A%u", last_ens_data.tvoc, last_ens_data.aqi);
-        display_draw_string_scaled(&display, display_font, 0, 0, line1, 2);
-        display_draw_string_scaled(&display, display_font, 0, 17, line2, 2);
+        if (basic_mode) {
+            const char *name = wifi_sync_get_assigned_name();
+            const char *display_name = (name && name[0]) ? name : "not_defined";
+            int char_w = 12;
+            int w = strlen(display_name) * char_w;
+            int x = (w > 128) ? 0 : (128 - w) / 2;
+            display_draw_string_scaled(&display, display_font, x, 10, display_name, 2);
+        } else {
+            char line1[16], line2[16];
+            snprintf(line1, sizeof(line1), "CO2 %u", last_ens_data.eco2);
+            snprintf(line2, sizeof(line2), "VOC %u A%u", last_ens_data.tvoc, last_ens_data.aqi);
+            display_draw_string_scaled(&display, display_font, 0, 0, line1, 2);
+            display_draw_string_scaled(&display, display_font, 0, 17, line2, 2);
+        }
     } else {
         const char *name = wifi_sync_get_assigned_name();
         const char *display_name = (name && name[0]) ? name : "not_defined";
@@ -147,16 +162,60 @@ static void update_display(void) {
     display_present(&display);
 }
 
-static void read_sensors_and_store(void) {
+static void client_adjust_time_after_sleep(uint32_t sleep_ms) {
+    if (sleep_ms == 0) return;
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0) {
+        return;
+    }
+    uint32_t add_sec = sleep_ms / 1000;
+    uint32_t add_usec = (sleep_ms % 1000) * 1000;
+    tv.tv_usec += add_usec;
+    if ((uint32_t)tv.tv_usec >= 1000000) {
+        tv.tv_sec++;
+        tv.tv_usec -= 1000000;
+    }
+    tv.tv_sec += add_sec;
+    settimeofday(&tv, NULL);
+    ESP_LOGI(TAG, "[TIME] Adjusted by %u ms (was %lu, now %lu)",
+             sleep_ms, (unsigned long)(tv.tv_sec - add_sec), (unsigned long)tv.tv_sec);
+}
+
+static void client_sync_time_with_server(void) {
+    if (!wifi_manager_is_connected()) return;
+    uint32_t ts = 0;
+    esp_err_t ret = wifi_sync_get_server_time(&ts);
+    if (ret == ESP_OK && ts > 0) {
+        struct timeval tv = { .tv_sec = (time_t)ts, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "[TIME] Synced from server: %lu", (unsigned long)ts);
+    } else {
+        ESP_LOGW(TAG, "[TIME] Server time sync failed: %d", ret);
+    }
+}
+
+static void client_show_sensor_error(void) {
+    display_clear_fb(&display);
+    display_draw_string_scaled(&display, display_font, 16, 0, "SENSOR", 2);
+    display_draw_string_scaled(&display, display_font, 28, 17, "ERROR", 2);
+    display_present(&display);
+    display_on(&display);
+}
+
+static bool read_sensors_and_store(void) {
     ESP_LOGI(TAG, "[SENSORS] Reading...");
 
     aht21_data_t aht_data = {0};
     ens160_data_t ens_data = {0};
+    bool basic_mode = wifi_sync_is_basic_mode();
+    bool aht_ok = false;
+    bool ens_ok = false;
 
     int aht_ret = aht21_read(I2C_NUM_0, &aht_data);
     esp_task_wdt_reset();
     if (aht_ret == 0) {
         last_aht_data = aht_data;
+        aht_ok = true;
         int t_int = (int)aht_data.temperature;
         int t_dec = (int)(aht_data.temperature * 10) % 10;
         if (t_dec < 0) t_dec = -t_dec;
@@ -166,17 +225,23 @@ static void read_sensors_and_store(void) {
     }
 
 #if ENS160_ENABLE
-    int ens_ret = ens160_read(I2C_NUM_0, &ens_data);
-    esp_task_wdt_reset();
-    if (ens_ret == 0) {
-        last_ens_data = ens_data;
-        ESP_LOGI(TAG, "[SENSORS] ENS160: eCO2=%u TVOC=%u AQI=%u", ens_data.eco2, ens_data.tvoc, ens_data.aqi);
+    if (basic_mode) {
+        last_ens_data = (ens160_data_t){0};
+        ESP_LOGI(TAG, "[SENSORS] ENS160 skipped (basic_mode)");
     } else {
-        ESP_LOGW(TAG, "[SENSORS] ENS160 failed: %d", ens_ret);
-    }
+        int ens_ret = ens160_read(I2C_NUM_0, &ens_data);
+        esp_task_wdt_reset();
+        if (ens_ret == 0) {
+            last_ens_data = ens_data;
+            ens_ok = true;
+            ESP_LOGI(TAG, "[SENSORS] ENS160: eCO2=%u TVOC=%u AQI=%u", ens_data.eco2, ens_data.tvoc, ens_data.aqi);
+        } else {
+            ESP_LOGW(TAG, "[SENSORS] ENS160 failed: %d", ens_ret);
+        }
 
-    ens160_set_env(I2C_NUM_0, last_aht_data.temperature, last_aht_data.humidity);
-    esp_task_wdt_reset();
+        ens160_set_env(I2C_NUM_0, last_aht_data.temperature, last_aht_data.humidity);
+        esp_task_wdt_reset();
+    }
 #else
     (void)ens_data;
     ESP_LOGI(TAG, "[SENSORS] ENS160 disabled");
@@ -184,8 +249,13 @@ static void read_sensors_and_store(void) {
 
     client_uptime_sec = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS / 1000);
 
+    time_t now_ts = time(NULL);
+    if (now_ts <= 0) {
+        now_ts = (time_t)client_uptime_sec;
+    }
+
     client_record_t record = {
-        .timestamp = client_uptime_sec,
+        .timestamp = now_ts,
         .uptime_sec = client_uptime_sec,
         .temperature = last_aht_data.temperature,
         .humidity = last_aht_data.humidity,
@@ -196,10 +266,17 @@ static void read_sensors_and_store(void) {
     };
 
     if (data_storage_append(&record) == 0) {
-        ESP_LOGI(TAG, "[STORAGE] Saved, total=%d", data_storage_get_count());
+        ESP_LOGI(TAG, "[STORAGE] Saved ts=%ld up=%u, total=%d",
+                 (long)record.timestamp, record.uptime_sec,
+                 data_storage_get_count());
     } else {
         ESP_LOGW(TAG, "[STORAGE] Append failed, SPIFFS may be full");
     }
+
+    if (basic_mode) {
+        return aht_ok;
+    }
+    return aht_ok && ens_ok;
 }
 
 static esp_err_t client_ensure_wifi_connected(void) {
@@ -220,6 +297,52 @@ static esp_err_t client_ensure_wifi_connected(void) {
     return wifi_manager_is_connected() ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+static esp_err_t client_bootstrap_wifi(void) {
+    if (s_wifi_initialized && wifi_manager_is_connected() && wifi_sync_get_server_ip() != NULL) {
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "[WIFI] Bootstrapping connection for cycle");
+    esp_err_t ret = wifi_sync_connect_to_server(CLIENT_WIFI_SSID, CLIENT_WIFI_PASS,
+                                                CLIENT_WIFI_SSID_2, CLIENT_WIFI_PASS_2);
+    s_wifi_initialized = (ret == ESP_OK);
+    return ret;
+}
+
+static esp_err_t client_perform_upload_cycle(bool from_button);
+
+static void client_turn_off_wifi_and_reset_state(TickType_t now) {
+    if (wifi_manager_is_connected() || wifi_sync_get_server_ip() != NULL) {
+        ESP_LOGI(TAG, "[WIFI] Stopping after upload cycle");
+        esp_err_t stop_ret = esp_wifi_stop();
+        if (stop_ret != ESP_OK) {
+            ESP_LOGW(TAG, "[WIFI] esp_wifi_stop() failed: %d", stop_ret);
+        }
+    }
+}
+
+static esp_err_t client_perform_upload_cycle(bool from_button) {
+    esp_err_t ret = client_bootstrap_wifi();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "[CYCLE] WiFi bootstrap failed");
+        return ret;
+    }
+    if (!wifi_manager_is_connected()) {
+        ret = client_ensure_wifi_connected();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "[CYCLE] WiFi not available");
+            return ret;
+        }
+    }
+    client_sync_time_with_server();
+    ret = wifi_sync_upload_unsynced();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "[CYCLE] Upload OK");
+    } else {
+        ESP_LOGW(TAG, "[CYCLE] Upload failed: %d", ret);
+    }
+    return ret;
+}
+
 static void client_task(void *pvParameters) {
     (void)pvParameters;
     static int task_start_count = 0;
@@ -234,11 +357,12 @@ static void client_task(void *pvParameters) {
 
     client_state_t state = STATE_DISCOVERING;
     int upload_failures = 0;
-    bool wifi_initialized = false;
     bool display_active = false;
     TickType_t display_on_until = 0;
     int local_display_screen = 0;
     int initial_polls_remaining = 6;
+    bool woke_by_button = false;
+    bool woke_by_timer = false;
 
     display_off(&display);
 
@@ -249,7 +373,7 @@ static void client_task(void *pvParameters) {
         esp_task_wdt_reset();
 
         bool button_pressed = button_is_pressed_debounced();
-        if (button_pressed) {
+        if (button_pressed && !woke_by_button) {
             ESP_LOGI(TAG, "[BUTTON] Detected press (debounced)");
         }
 
@@ -261,11 +385,110 @@ static void client_task(void *pvParameters) {
                 display_off(&display);
                 ESP_LOGI(TAG, "[DISPLAY] Timeout, OFF");
             } else if ((now - last_screen_switch) >= pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS)) {
-                local_display_screen = (local_display_screen + 1) % 3;
+                int max_screens = wifi_sync_is_basic_mode() ? 2 : 3;
+                local_display_screen = (local_display_screen + 1) % max_screens;
                 display_screen = local_display_screen;
                 update_display();
                 last_screen_switch = now;
             }
+        }
+
+        if (woke_by_button) {
+            ESP_LOGI(TAG, "[CYCLE] Button wake: read + upload + sync time");
+            bool sensor_ok = read_sensors_and_store();
+            last_sensor_read = now;
+            if (!sensor_ok) {
+                ESP_LOGE(TAG, "[CYCLE] Sensor read failed");
+                client_show_sensor_error();
+                vTaskDelay(pdMS_TO_TICKS(4000));
+                display_active = false;
+                local_display_screen = 0;
+                display_screen = 0;
+                display_off(&display);
+                ESP_LOGI(TAG, "[CYCLE] Going back to sleep after sensor error");
+            } else {
+                display_active = true;
+                local_display_screen = 0;
+                display_screen = 0;
+                last_screen_switch = now;
+                int max_screens = wifi_sync_is_basic_mode() ? 2 : 3;
+                display_on_until = now + pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS * max_screens);
+                display_on(&display);
+                update_display();
+                vTaskDelay(pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS));
+
+                esp_err_t cycle_ret = client_perform_upload_cycle(true);
+                last_upload_attempt = now;
+
+                if (cycle_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "[CYCLE] Upload OK, server time applied");
+                } else {
+                    ESP_LOGW(TAG, "[CYCLE] Upload failed (%d), data kept locally", cycle_ret);
+                }
+
+                local_display_screen = (local_display_screen + 1) % max_screens;
+                display_screen = local_display_screen;
+                last_screen_switch = now;
+                update_display();
+                vTaskDelay(pdMS_TO_TICKS(DISPLAY_SCREEN_INTERVAL_MS));
+
+                display_active = false;
+                local_display_screen = 0;
+                display_screen = 0;
+                display_off(&display);
+            }
+
+            client_turn_off_wifi_and_reset_state(now);
+            state = STATE_AUTONOMOUS;
+            state_entered = now;
+            last_discovery_attempt = now;
+            s_wifi_initialized = false;
+            upload_failures = 0;
+
+            woke_by_button = false;
+            s_planned_sleep_ms = SENSOR_READ_INTERVAL_MS;
+            esp_sleep_enable_timer_wakeup((uint64_t)s_planned_sleep_ms * 1000);
+            ESP_LOGI(TAG, "[SLEEP] After button cycle, timer sleep for %u ms", s_planned_sleep_ms);
+            button_enable_wakeup();
+            esp_light_sleep_start();
+            button_disable_wakeup();
+            client_adjust_time_after_sleep(s_planned_sleep_ms);
+
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        if (woke_by_timer) {
+            ESP_LOGI(TAG, "[CYCLE] Timer wake: read + upload + sync time");
+            read_sensors_and_store();
+            last_sensor_read = now;
+            esp_err_t cycle_ret = client_perform_upload_cycle(false);
+            last_upload_attempt = now;
+
+            if (cycle_ret == ESP_OK) {
+                ESP_LOGI(TAG, "[CYCLE] Timer cycle OK, server time applied");
+            } else {
+                ESP_LOGW(TAG, "[CYCLE] Timer cycle upload failed (%d), data kept locally", cycle_ret);
+            }
+
+            client_turn_off_wifi_and_reset_state(now);
+            state = STATE_AUTONOMOUS;
+            state_entered = now;
+            last_discovery_attempt = now;
+            s_wifi_initialized = false;
+            upload_failures = 0;
+
+            woke_by_timer = false;
+            s_planned_sleep_ms = SENSOR_READ_INTERVAL_MS;
+            esp_sleep_enable_timer_wakeup((uint64_t)s_planned_sleep_ms * 1000);
+            ESP_LOGI(TAG, "[SLEEP] After timer cycle, timer sleep for %u ms", s_planned_sleep_ms);
+            button_enable_wakeup();
+            esp_light_sleep_start();
+            button_disable_wakeup();
+            client_adjust_time_after_sleep(s_planned_sleep_ms);
+
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
         }
 
         if ((now - last_sensor_read) >= pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS)) {
@@ -278,16 +501,17 @@ static void client_task(void *pvParameters) {
 
         switch (state) {
             case STATE_DISCOVERING:
-                if (!wifi_initialized) {
+                if (!s_wifi_initialized) {
                     ESP_LOGI(TAG, "[STATE] DISCOVERING: starting WiFi");
                     esp_err_t ret = wifi_sync_connect_to_server(CLIENT_WIFI_SSID, CLIENT_WIFI_PASS,
                                                                 CLIENT_WIFI_SSID_2, CLIENT_WIFI_PASS_2);
-                    wifi_initialized = true;
+                    s_wifi_initialized = true;
                     if (ret == ESP_OK) {
                         state = STATE_CONNECTED;
                         state_entered = now;
                         upload_failures = 0;
                         ESP_LOGI(TAG, "[STATE] -> CONNECTED");
+                        client_sync_time_with_server();
                         wifi_sync_upload_unsynced();
                         last_upload_attempt = now;
                     }
@@ -296,6 +520,7 @@ static void client_task(void *pvParameters) {
                     state_entered = now;
                     upload_failures = 0;
                     ESP_LOGI(TAG, "[STATE] -> CONNECTED (server found)");
+                    client_sync_time_with_server();
                     wifi_sync_upload_unsynced();
                     last_upload_attempt = now;
                 } else if ((now - state_entered) >= pdMS_TO_TICKS(CONFIG_CLIENT_DISCOVER_TIMEOUT_MS)) {
@@ -303,9 +528,9 @@ static void client_task(void *pvParameters) {
                     state = STATE_AUTONOMOUS;
                     state_entered = now;
                     last_discovery_attempt = now;
-                    if (wifi_initialized) {
+                    if (s_wifi_initialized) {
                         esp_wifi_stop();
-                        wifi_initialized = false;
+                        s_wifi_initialized = false;
                     }
                 }
                 break;
@@ -317,6 +542,7 @@ static void client_task(void *pvParameters) {
                     ESP_LOGI(TAG, "[STATE] CONNECTED: uploading...");
                     esp_err_t ret = client_ensure_wifi_connected();
                     if (ret == ESP_OK) {
+                        client_sync_time_with_server();
                         ret = wifi_sync_upload_unsynced();
                     }
                     last_upload_attempt = now;
@@ -332,7 +558,7 @@ static void client_task(void *pvParameters) {
                             state_entered = now;
                             last_discovery_attempt = now;
                             esp_wifi_stop();
-                            wifi_initialized = false;
+                            s_wifi_initialized = false;
                         }
                     }
                 }
@@ -344,7 +570,7 @@ static void client_task(void *pvParameters) {
                     ESP_LOGI(TAG, "[STATE] AUTONOMOUS: retry discovery");
                     state = STATE_DISCOVERING;
                     state_entered = now;
-                    wifi_initialized = false;
+                    s_wifi_initialized = false;
                 }
                 break;
         }
@@ -352,7 +578,9 @@ static void client_task(void *pvParameters) {
         if (button_pressed && !display_active) {
             ESP_LOGI(TAG, "[BUTTON] Turning display ON");
             display_active = true;
-            display_on_until = now + pdMS_TO_TICKS(DISPLAY_ON_MS);
+            int max_screens = wifi_sync_is_basic_mode() ? 2 : 3;
+            uint32_t on_ms = DISPLAY_SCREEN_INTERVAL_MS * max_screens;
+            display_on_until = now + pdMS_TO_TICKS(on_ms);
             local_display_screen = 0;
             display_screen = 0;
             last_screen_switch = now;
@@ -399,9 +627,7 @@ static void client_task(void *pvParameters) {
                 }
             } else {
                 last_sleep_skip_logged = false;
-                /* In CONNECTED state keep WiFi on so the next upload can start
-                 * immediately after wake.  Stop WiFi only in AUTONOMOUS mode. */
-                if (state == STATE_AUTONOMOUS && wifi_initialized) {
+                if (state == STATE_AUTONOMOUS && s_wifi_initialized) {
                     ESP_LOGI(TAG, "[WIFI] Stopping for light sleep");
                     esp_err_t stop_ret = esp_wifi_stop();
                     if (stop_ret != ESP_OK) {
@@ -412,6 +638,7 @@ static void client_task(void *pvParameters) {
                 button_enable_wakeup();
 
                 uint32_t sleep_ms = sleep_ticks * portTICK_PERIOD_MS;
+                s_planned_sleep_ms = sleep_ms;
                 uint64_t sleep_us = ((uint64_t)sleep_ms) * 1000;
                 ESP_LOGI(TAG, "[SLEEP] Light sleep for %u ms (button wake enabled)", sleep_ms);
 
@@ -422,33 +649,16 @@ static void client_task(void *pvParameters) {
                 ESP_LOGI(TAG, "[WAKE] raw GPIO=%d isr_count=%u", wake_gpio, button_get_isr_count());
 
                 button_disable_wakeup();
+                client_adjust_time_after_sleep(s_planned_sleep_ms);
 
-                bool woke_by_button = button_is_pressed();
-                if (woke_by_button) {
+                bool button_down = button_is_pressed();
+                if (button_down) {
                     button_set_pressed_flag();
                     ESP_LOGI(TAG, "[WAKE] GPIO (button)");
-                } else if (state == STATE_AUTONOMOUS && !wifi_manager_is_connected()) {
-                    ESP_LOGI(TAG, "[WAKE] Timer");
-                    ESP_LOGI(TAG, "[WIFI] Restarting after timer wake");
-                    esp_err_t start_ret = esp_wifi_start();
-                    if (start_ret != ESP_OK) {
-                        ESP_LOGW(TAG, "[WIFI] esp_wifi_start() failed: %d", start_ret);
-                    }
-
-                    int retry = 0;
-                    while (!wifi_manager_is_connected() && retry < 30) {
-                        vTaskDelay(pdMS_TO_TICKS(1000));
-                        esp_task_wdt_reset();
-                        retry++;
-                    }
-
-                    if (wifi_manager_is_connected()) {
-                        ESP_LOGI(TAG, "[WIFI] Reconnected");
-                    } else {
-                        ESP_LOGW(TAG, "[WIFI] Reconnect timeout");
-                    }
+                    woke_by_button = true;
                 } else {
                     ESP_LOGI(TAG, "[WAKE] Timer");
+                    woke_by_timer = true;
                 }
             }
         }
@@ -553,6 +763,7 @@ void app_main(void) {
             ESP_LOGI(TAG, "  Secondary SSID: %s", CLIENT_WIFI_SSID_2);
         }
         ESP_LOGI(TAG, "  Time source: %s", (time(NULL) > 0) ? "server" : "none");
+        ESP_LOGI(TAG, "  Basic mode: %s", wifi_sync_is_basic_mode() ? "true" : "false");
         ESP_LOGI(TAG, "  Heap at init: %d KB", (int)(esp_get_free_heap_size() / 1024));
         ESP_LOGI(TAG, "=== END SELF-TEST ===");
     }

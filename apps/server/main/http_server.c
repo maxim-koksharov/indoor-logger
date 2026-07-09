@@ -192,11 +192,12 @@ static esp_err_t client_get_handler(httpd_req_t *req) {
 
     pos += snprintf(buf + pos, bufsz - pos,
         "{\"id\":\"%s\",\"name\":\"%s\",\"online\":%s,"
-        "\"last_seen\":%lu,\"ip\":\"%s\",\"records\":%lu,\"data\":[",
+        "\"last_seen\":%lu,\"ip\":\"%s\",\"records\":%lu,\"basic_mode\":%s,\"data\":[",
         client->id, client->name,
         client->online ? "true" : "false",
         (unsigned long)client->last_seen, client->ip_str,
-        (unsigned long)rec_count);
+        (unsigned long)rec_count,
+        client_registry_get_basic_mode(client->id) ? "true" : "false");
 
     for (int i = 0; i < read_count; i++) {
         if (i > 0 && pos < bufsz) buf[pos++] = ',';
@@ -295,7 +296,17 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
         cJSON_ArrayForEach(item, records_array) {
             if (!cJSON_IsObject(item)) continue;
             data_record_t rec = {0};
-            rec.timestamp = server_get_timestamp();
+
+            cJSON *ts_item = cJSON_GetObjectItem(item, "ts");
+            uint32_t client_ts = 0;
+            if (ts_item && cJSON_IsNumber(ts_item)) {
+                client_ts = (uint32_t)ts_item->valuedouble;
+            }
+            if (client_ts > 1577836800U) { /* 2020-01-01 */
+                rec.timestamp = client_ts;
+            } else {
+                rec.timestamp = server_get_timestamp();
+            }
 
             cJSON *t = cJSON_GetObjectItem(item, "t");
             if (!t) t = cJSON_GetObjectItem(item, "temp");
@@ -339,16 +350,19 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
     uint32_t sync_interval = config_get_sync_interval();
     uint32_t ts = server_get_timestamp();
     const char *tz = config_get_timezone();
+    bool basic_mode = client_registry_get_basic_mode(client_id);
 
-    char resp_buf[320];
+    char resp_buf[384];
     int resp_len = snprintf(resp_buf, sizeof(resp_buf),
-        "{\"status\":\"ok\",\"accepted\":%d,\"timestamp\":%lu,\"sync_interval\":%lu,\"name\":\"%s\",\"timezone\":\"%s\"}",
-        count, (unsigned long)ts, (unsigned long)sync_interval, client_name, tz);
+        "{\"status\":\"ok\",\"accepted\":%d,\"timestamp\":%lu,\"sync_interval\":%lu,\"name\":\"%s\",\"timezone\":\"%s\",\"basic_mode\":%s}",
+        count, (unsigned long)ts, (unsigned long)sync_interval, client_name, tz,
+        basic_mode ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp_buf, resp_len);
-    ESP_LOGI(TAG, "Upload: accepted %d records from %s (name=%s, sync=%lu, ts=%lu)",
+    ESP_LOGI(TAG, "Upload: accepted %d records from %s (name=%s, sync=%lu, ts=%lu, basic_mode=%s)",
              count, client_id, client_name,
-             (unsigned long)sync_interval, (unsigned long)ts);
+             (unsigned long)sync_interval, (unsigned long)ts,
+             basic_mode ? "true" : "false");
     return ESP_OK;
 }
 
@@ -527,6 +541,70 @@ static esp_err_t client_name_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t client_basic_mode_get_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    if (client_id[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing id param", 16);
+        return ESP_OK;
+    }
+
+    client_info_t *c = client_registry_get(client_id);
+    if (c == NULL) {
+        httpd_resp_send_404(req);
+        return ESP_OK;
+    }
+
+    bool basic_mode = client_registry_get_basic_mode(client_id);
+    char buf[96];
+    int n = snprintf(buf, sizeof(buf),
+        "{\"id\":\"%s\",\"basic_mode\":%s}", client_id,
+        basic_mode ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static esp_err_t client_basic_mode_post_handler(httpd_req_t *req) {
+    char client_id[32] = {0};
+    char value_str[8] = {0};
+    const char *query = strchr(req->uri, '?');
+    get_query_val(query, "id", client_id, sizeof(client_id));
+    get_query_val(query, "value", value_str, sizeof(value_str));
+
+    if (client_id[0] == '\0' || value_str[0] == '\0') {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing id or value", 19);
+        return ESP_OK;
+    }
+
+    int v = atoi(value_str);
+    if (v != 0 && v != 1) {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "invalid value", 13);
+        return ESP_OK;
+    }
+
+    if (client_registry_set_basic_mode(client_id, v == 1) != 0) {
+        client_registry_update(client_id, NULL, NULL);
+    }
+    if (client_registry_set_basic_mode(client_id, v == 1) != 0) {
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "client not found", 16);
+        return ESP_OK;
+    }
+    client_registry_save();
+
+    char buf[96];
+    int n = snprintf(buf, sizeof(buf), "{\"ok\":true,\"id\":\"%s\",\"basic_mode\":%s}",
+                     client_id, v ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
 static esp_err_t data_aggregated_get_handler(httpd_req_t *req) {
     char client_id[32] = {0};
     const char *query = strchr(req->uri, '?');
@@ -591,7 +669,7 @@ static esp_err_t data_aggregated_get_handler(httpd_req_t *req) {
 int http_server_init(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 14;
+    config.max_uri_handlers = 16;
     config.max_open_sockets = 8;
     config.lru_purge_enable = true;
 
@@ -661,6 +739,20 @@ int http_server_start(void) {
     };
     httpd_register_uri_handler(server, &name_uri);
 
+    httpd_uri_t basic_mode_uri = {
+        .uri = "/api/client/basic-mode",
+        .method = HTTP_GET,
+        .handler = client_basic_mode_get_handler
+    };
+    httpd_register_uri_handler(server, &basic_mode_uri);
+
+    httpd_uri_t basic_mode_post_uri = {
+        .uri = "/api/client/basic-mode",
+        .method = HTTP_POST,
+        .handler = client_basic_mode_post_handler
+    };
+    httpd_register_uri_handler(server, &basic_mode_post_uri);
+
     httpd_uri_t time_uri = {
         .uri = "/api/time",
         .method = HTTP_GET,
@@ -696,6 +788,6 @@ int http_server_start(void) {
     };
     httpd_register_uri_handler(server, &timezone_post_uri);
 
-    ESP_LOGI(TAG, "HTTP server started with 12 endpoints");
+    ESP_LOGI(TAG, "HTTP server started with 14 endpoints");
     return 0;
 }
