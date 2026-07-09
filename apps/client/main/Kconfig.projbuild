@@ -43,10 +43,27 @@ menu "Client Configuration"
 
     config CLIENT_DISCOVER_TIMEOUT_MS
         int "Server discovery timeout (ms)"
-        default 3000
-        range 500 10000
+        default 30000
+        range 5000 120000
         help
-            Timeout in milliseconds for UDP broadcast discovery.
+            Timeout in milliseconds for UDP broadcast discovery at boot.
             Client broadcasts a discovery request and waits for server response.
+            If the server is not found, the client switches to autonomous mode.
+
+    config CLIENT_RETRY_INTERVAL_MS
+        int "Server retry interval in autonomous mode (ms)"
+        default 3600000
+        range 60000 86400000
+        help
+            How often the client tries to find the server again when running
+            autonomously (no server connection). Default is 1 hour.
+
+    config CLIENT_DEFAULT_SYNC_INTERVAL_SEC
+        int "Default sync interval when connected (sec)"
+        default 600
+        range 60 86400
+        help
+            Default interval between uploads when the client is connected to
+            the server. The server can override this value remotely.
 
 endmenu
