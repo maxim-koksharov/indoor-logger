@@ -4,10 +4,12 @@
 
 ESP8266 embedded firmware monorepo (ESP8266 RTOS SDK / ESP-IDF style) with:
 - **Shared components**: SSD1306 OLED display driver, ENS160+AHT21 sensor drivers, WiFi manager, fonts
-- **Server app** (16MB ESP8266): STA WiFi, HTTP REST API, web dashboard, data aggregation
+- **Server app** (16MB ESP8266): STA WiFi, HTTP REST API, web dashboard, data aggregation, timezone handling
 - **Client app** (4MB/16MB ESP8266): OLED display, sensor readings, local storage, WiFi data sync to server
 
 **WiFi Mode:** Both devices connect to your home router (STA-only). No AP mode.
+
+**Credentials:** WiFi SSID/password and an optional fallback server IP are read from `/workspace/wifi.env` at build time via `cmake/wifi_config.cmake` (see Configuration below).
 
 C code only. All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}` when included from C++ files.
 
@@ -25,6 +27,18 @@ C code only. All FreeRTOS and ESP SDK headers must be wrapped in `extern "C" {}`
   - `/dev/ttyUSB1` — **Server** (Wemos D1 Mini, 16MB flash)
 - Container runs as the host user (UID:GID from `.env`) so files keep host ownership
 - `~/.config/opencode` and `~/.local/share/opencode` are bind-mounted, so the opencode **license/auth from the host** is used inside the container
+
+### WiFi credentials file
+
+Create `/workspace/wifi.env` (gitignored) before building:
+
+```bash
+WIFI_SSID=MyHomeWiFi
+WIFI_PASS=MyPassword
+SERVER_IP=192.168.1.100
+```
+
+`WIFI_SSID` and `WIFI_PASS` are used by both apps. `SERVER_IP` is an optional fallback used by the client when UDP broadcast discovery is blocked by the router.
 
 ### Run commands (from project root on the host)
 
@@ -67,8 +81,10 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 
 ```
 /workspace/
+├── cmake/                      # CMake helpers (wifi.env loader)
+│   └── wifi_config.cmake
 ├── components/                 # Shared libraries (IDF-style components)
-│   ├── display/                # SSD1306 OLED driver + C Display wrapper
+│   ├── display/                # SSD1306 OLED display driver + C Display wrapper
 │   ├── sensors/                # ENS160 + AHT21 sensor drivers
 │   ├── fonts/                  # Bitmap font library (GLCD, Terminus, etc.)
 │   └── wifi/                   # WiFi connection helper (STA-only with retry logic)
@@ -82,7 +98,9 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 │       ├── CMakeLists.txt
 │       ├── main/               # main.c, button.c, data_storage.c, wifi_sync.c
 │       ├── Kconfig.projbuild   # Client ID, display timeout, WiFi SSID/pass, server IP
+│       ├── partitions_client.csv # Custom partition table
 │       └── sdkconfig
+├── wifi.env                    # WiFi credentials (gitignored)
 ├── TODO.md
 ├── AGENTS.md
 └── README.md
@@ -97,9 +115,9 @@ The `xtensa-lx106-elf-*` toolchain binaries are already in `PATH`.
 | Interval | Value | Description |
 |---|---|---|
 | Sensor read | 5 minutes (300000 ms) | Reads AHT21 + ENS160, stores record to SPIFFS |
-| WiFi sync | 5 minutes (300000 ms) | Uploads unsynced records to server |
+| WiFi sync | 10 minutes (600000 ms, configurable) | Uploads up to 50 unsynced records to server |
 | Display switch | 3 seconds (3000 ms) | Toggles between screen 0 and screen 1 |
-| Sleep cycle | 100 ms - 5 min | `esp_light_sleep_start()` — blocks until timer or GPIO wake |
+| Sleep cycle | 100 ms - 10 min | `esp_light_sleep_start()` — blocks until timer or GPIO wake |
 
 ## Client power saving modes
 
@@ -140,6 +158,16 @@ The client uses light sleep mode with WiFi stop/start cycles. This provides ~0.7
 - After timer wake: `esp_wifi_start()` triggers auto-reconnect via WIFI_EVENT_STA_START
 - After button wake: display updates, no WiFi needed, returns to sleep
 - RAM preserved during light sleep, so static variables retain values
+
+### Client sync state machine
+
+The client operates in one of three states:
+
+| State | Behavior | Transition |
+|---|---|---|
+| `STATE_DISCOVERING` | Connect to WiFi, try UDP broadcast discovery for `CONFIG_CLIENT_DISCOVER_TIMEOUT_MS` | On server found or fallback IP configured → `CONNECTED`; on WiFi failure → `AUTONOMOUS` |
+| `STATE_CONNECTED` | Upload up to 50 records, apply server config (time, sync interval, name, timezone), sleep for sync interval | On upload failure → `AUTONOMOUS` |
+| `STATE_AUTONOMOUS` | Continue sensor reads and local storage, retry discovery every `CONFIG_CLIENT_RETRY_INTERVAL_MS` | On successful discovery → `CONNECTED` |
 
 ### Light sleep architecture
 
@@ -269,6 +297,67 @@ The ESP8266 RTOS SDK v3.4 mDNS component references `ip6_addr_t` which is not de
 
 When NTP is unavailable, `time(NULL)` returns 0. The server uses `server_get_timestamp()` which returns `time(NULL)` if valid (> 0), otherwise returns uptime since server start. Declare `extern uint32_t server_get_timestamp(void);` in any C file that needs it.
 
+## Server timezone
+
+The server applies a POSIX timezone string via `setenv("TZ", ...) / tzset()` before SNTP sync. The default timezone is **Lisbon (WET/WEST)**:
+
+```
+WET0WEST,M3.5.0/1,M10.5.0/2
+```
+
+The timezone is stored in NVS namespace `config` key `timezone` and survives reboots. It can be changed at runtime via:
+
+- Web UI: dropdown or custom POSIX TZ string
+- API: `GET /api/timezone`, `POST /api/timezone?value=<tz_string>`
+
+The timezone string is also included in the upload response (`{"timezone":"..."}`) and applied on the client, so both devices show the same local time.
+
+Common POSIX timezone strings:
+
+| Location | POSIX TZ string |
+|---|---|
+| Lisbon (default) | `WET0WEST,M3.5.0/1,M10.5.0/2` |
+| UTC | `UTC0` |
+| London | `GMT0BST,M3.5.0/1,M10.5.0/2` |
+| Berlin / Paris / Madrid / Rome | `CET-1CEST,M3.5.0/2,M10.5.0/3` |
+| New York / Miami / Atlanta | `EST5EDT,M3.2.0/2,M11.1.0/2` |
+| Chicago / Houston | `CST6CDT,M3.2.0/2,M11.1.0/2` |
+| Denver / Salt Lake City | `MST7MDT,M3.2.0/2,M11.1.0/2` |
+| Los Angeles / Seattle | `PST8PDT,M3.2.0/2,M11.1.0/2` |
+| Moscow | `MSK-3` |
+| Tokyo / Osaka | `JST-9` |
+| Beijing / Shanghai / Hong Kong | `CST-8` |
+| Singapore | `SGT-8` |
+| Seoul | `KST-9` |
+| Bangkok / Jakarta | `ICT-7` |
+| Dubai / Abu Dhabi | `GST-4` |
+| India (Mumbai / Delhi) | `IST-5:30` |
+| Sydney (with DST) | `AEDT-10AEST,M10.1.0/2,M4.1.0/3` |
+| Auckland (with DST) | `NZDT-12NZST,M9.5.0/2,M4.1.0/3` |
+| São Paulo | `BRT3` |
+| Buenos Aires | `ART3` |
+| Cairo | `EET-2EEST,M4.last.4/24,M10.last.4/24` |
+| Jerusalem | `IST-2IDT,M3.4.4/26,M10.5.0` |
+| South Africa (Johannesburg) | `SAST-2` |
+| Turkey (Istanbul) | `TRT-3` |
+
+These strings can be pasted into the web UI custom timezone field or sent via the API:
+
+```bash
+curl -X POST "http://192.168.1.100/api/timezone?value=CET-1CEST,M3.5.0/2,M10.5.0/3"
+```
+
+## Server sync interval
+
+The server sync interval controls how often the client wakes up to upload data. The default is **600 seconds (10 minutes)**.
+
+The interval is stored in NVS namespace `config` key `sync_int` and survives reboots. It can be changed at runtime via:
+
+- Web UI: number input
+- API: `GET /api/sync-interval`, `POST /api/sync-interval?value=<seconds>`
+
+The interval is included in the upload response (`{"sync_interval":600}`) and applied on the client.
+
 ## Kconfig options
 
 ### Server (`apps/server/main/Kconfig.projbuild`)
@@ -291,6 +380,8 @@ Credentials can also be stored in NVS (`wifi:sta_ssid`, `wifi:sta_pass`). NVS ta
 | `CONFIG_CLIENT_WIFI_SSID` | `""` | WiFi SSID (same as server) |
 | `CONFIG_CLIENT_WIFI_PASS` | `""` | WiFi password (same as server) |
 | `CONFIG_CLIENT_DISCOVER_TIMEOUT_MS` | 3000 | UDP broadcast discovery timeout |
+| `CONFIG_CLIENT_RETRY_INTERVAL_MS` | 3600000 | Autonomous mode retry interval |
+| `CONFIG_CLIENT_DEFAULT_SYNC_INTERVAL_SEC` | 600 | Default sync interval until server config is received |
 
 ## Self-test at startup
 
@@ -608,7 +699,12 @@ No address conflicts exist. All three devices can coexist on the same bus.
 ## Architecture
 
 - `apps/server/main/main.c` — Server entry: NVS → data_store → registry_load → WiFi (STA-only) → SNTP → HTTP server start → main loop with stale checker
+- `apps/server/main/http_server.c` — HTTP REST API handlers, web UI, sync interval/timezone config
+- `apps/server/main/data_store.c` — Per-client SPIFFS ring buffer for sensor records
+- `apps/server/main/client_registry.c` — Client metadata (name, online status, IP)
 - `apps/client/main/main.c` — Client entry: NVS → display_init → sensor init → storage init → WiFi sync init → separate FreeRTOS task `client_task` for main loop (sensor reads, display updates, WiFi sync)
+- `apps/client/main/wifi_sync.c` — UDP discovery, HTTP upload, server config parsing (time/interval/name/timezone)
+- `apps/client/main/data_storage.c` — Local SPIFFS ring buffer for unsynced records
 - `components/display/` — C Display wrapper around `ssd1306.c` SSD1306 driver (third-party, MIT licensed)
 - `components/sensors/` — ENS160 and AHT21 I2C sensor drivers
 - `components/fonts/` — Compile-time bitmap font library (GLCD 5x7, Terminus, etc.)
@@ -616,12 +712,15 @@ No address conflicts exist. All three devices can coexist on the same bus.
 
 ## Configuration
 
+- `wifi.env` — WiFi credentials and optional fallback server IP (gitignored, loaded at build time by `cmake/wifi_config.cmake`)
 - `sdkconfig` — ESP-IDF project configuration (gitignored, local only)
 - ESP-IDF version: v3.4-110-gd412ac60
 - Flash mode: QIO, 40 MHz
 - Flash size: 4 MB physical (configured as 2 MB in sdkconfig — works fine)
 - CPU frequency: 80 MHz
 - Monitor baud: 74880
+
+Credential priority for both apps: **NVS** → **`wifi.env`** → **Kconfig defaults**.
 
 ## Adding new I2C drivers
 

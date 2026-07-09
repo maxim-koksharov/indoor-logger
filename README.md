@@ -7,16 +7,17 @@ ESP8266-based indoor air quality monitoring system with OLED display, ENS160+AHT
 Two ESP8266 devices communicating over WiFi (both connect to your home router):
 
 ```
-┌────────────────────┐       WiFi (STA)        ┌────────────────────┐
-│   Server (16MB)    │◄──────────────────────►│   Client (4MB)     │
-│                    │   Your Home Router      │                    │
-│  STA mode          │       192.168.2.x       │  STA mode          │
-│  HTTP REST API     │                         │  OLED Display      │
-│  Web Dashboard     │                         │  ENS160 + AHT21    │
-│  Data Aggregation  │                         │  Local SPIFFS      │
-│  UDP discovery     │                         │  WiFi sync         │
-│  Backup WiFi       │                         │  UDP discovery     │
-└────────────────────┘                         └────────────────────┘
+┌────────────────────┐      WiFi (STA)       ┌────────────────────┐
+│   Server (16MB)    │◄─────────────────────►│   Client (4MB)     │
+│                    │    Your Home Router   │                    │
+│  STA mode          │      192.168.x.x      │  STA mode          │
+│  HTTP REST API     │                       │  OLED Display      │
+│  Web Dashboard     │                       │  ENS160 + AHT21    │
+│  Data Aggregation  │                       │  Local SPIFFS      │
+│  UDP discovery     │                       │  WiFi sync         │
+│  Backup WiFi       │                       │  UDP discovery     │
+│  Timezone config   │                       │  Fallback SERVER_IP│
+└────────────────────┘                       └────────────────────┘
 ```
 
 **WiFi Mode:**
@@ -95,7 +96,19 @@ idf.py -C apps/server fullclean
 
 ## WiFi Configuration
 
-WiFi SSID and password are set through `menuconfig` when building the firmware.
+WiFi SSID and password are read from `/workspace/wifi.env` at build time. Create the file (it is gitignored):
+
+```bash
+cat > /workspace/wifi.env <<EOF
+WIFI_SSID=MyHomeWiFi
+WIFI_PASS=MyPassword
+SERVER_IP=192.168.1.100
+EOF
+```
+
+`SERVER_IP` is optional. It is used by the client as a fallback when UDP broadcast discovery is blocked by the router.
+
+You can still override credentials via `menuconfig` or NVS if needed.
 
 ### Server
 
@@ -140,16 +153,24 @@ idf.py -C apps/client -p /dev/ttyUSB0 flash
 - The client connects to the same router (STA mode)
 - Sends a UDP broadcast on port 5000 to discover the server
 - Automatically uses the IP returned by the server for data uploads
+- Falls back to `SERVER_IP` from `wifi.env` if broadcast discovery is blocked
+- Runs a state machine:
+  - `DISCOVERING` — connect to WiFi, discover server
+  - `CONNECTED` — upload records, apply server config, sleep for sync interval
+  - `AUTONOMOUS` — keep reading sensors locally, retry discovery every hour
 
 ### What is `menuconfig` and why do I need it?
 
 `idf.py menuconfig` opens a text-based project configuration UI.
 It lets you change build parameters without editing source files:
 
+**WiFi credentials** are read from `wifi.env` at build time. Use `menuconfig` only if you want to override them or store them in the firmware image directly.
+
 **For the client** (`Client Configuration`):
 - `Client device identifier` — unique device ID (default `test_client`).
   Used as `?id=<client_id>` when uploading to the server.
-- `WiFi SSID / Password` — router credentials (must match the server).
+- `Display timeout` — auto-off timeout in seconds (0 = always on).
+- `Discovery timeout / retry interval / default sync interval` — discovery and sync behavior.
 
 Changes are saved in `sdkconfig` and applied on `idf.py build`.
 The config options are exposed in code as `CONFIG_CLIENT_ID`, etc.
@@ -318,6 +339,7 @@ This is the primary way to verify that everything works:
   STA: connected
   STA config: YourNetwork
   Time source: NTP
+  Timezone: WET0WEST,M3.5.0/1,M10.5.0/2
   IP: 192.168.1.100
   Heap: 102 KB free
 === END SELF-TEST ===
@@ -334,8 +356,13 @@ Use the IP directly: `http://192.168.1.100/`
 | GET | `/api/health` | Server status, uptime, free heap |
 | GET | `/api/clients` | List all registered clients |
 | GET | `/api/client?id=<id>` | Client details + last 24 records |
-| POST | `/api/upload?id=<id>` | Upload sensor data JSON |
+| POST | `/api/upload?id=<id>` | Upload sensor data JSON. Response includes `timestamp`, `sync_interval`, `name`, `timezone` |
 | GET | `/api/data?id=<id>&offset=&limit=` | Query stored records |
+| GET | `/api/sync-interval` | Get current sync interval (seconds) |
+| POST | `/api/sync-interval?value=<sec>` | Set sync interval (seconds) |
+| GET | `/api/timezone` | Get current POSIX timezone string |
+| POST | `/api/timezone?value=<tz>` | Set POSIX timezone string |
+| GET | `/api/client/name?id=<id>&name=<name>` | Rename a client |
 
 ### Upload JSON Format
 
@@ -373,6 +400,55 @@ SERVER_BACKUP_SSID/PASS) or stored in NVS (`wifi:sta_ssid`, `wifi:sta_pass`).
 - On other connection errors → retry every 60 sec
 - After 3 consecutive `NO_AP_FOUND` events → switch to backup SSID (if configured)
 
+### Timezone
+
+The server uses **Lisbon (WET/WEST)** by default:
+
+```
+WET0WEST,M3.5.0/1,M10.5.0/2
+```
+
+Change it at runtime from the web dashboard or via the API:
+
+```bash
+# Set to UTC
+curl -X POST "http://192.168.1.100/api/timezone?value=UTC0"
+
+# Set to Berlin
+curl -X POST "http://192.168.1.100/api/timezone?value=CET-1CEST,M3.5.0/2,M10.5.0/3"
+```
+
+Common POSIX timezone strings:
+
+| Location | POSIX TZ string |
+|---|---|
+| Lisbon (default) | `WET0WEST,M3.5.0/1,M10.5.0/2` |
+| UTC | `UTC0` |
+| London | `GMT0BST,M3.5.0/1,M10.5.0/2` |
+| Berlin / Paris / Madrid / Rome | `CET-1CEST,M3.5.0/2,M10.5.0/3` |
+| New York / Miami / Atlanta | `EST5EDT,M3.2.0/2,M11.1.0/2` |
+| Chicago / Houston | `CST6CDT,M3.2.0/2,M11.1.0/2` |
+| Denver / Salt Lake City | `MST7MDT,M3.2.0/2,M11.1.0/2` |
+| Los Angeles / Seattle | `PST8PDT,M3.2.0/2,M11.1.0/2` |
+| Moscow | `MSK-3` |
+| Tokyo / Osaka | `JST-9` |
+| Beijing / Shanghai / Hong Kong | `CST-8` |
+| Singapore | `SGT-8` |
+| Seoul | `KST-9` |
+| Bangkok / Jakarta | `ICT-7` |
+| Dubai / Abu Dhabi | `GST-4` |
+| India (Mumbai / Delhi) | `IST-5:30` |
+| Sydney (with DST) | `AEDT-10AEST,M10.1.0/2,M4.1.0/3` |
+| Auckland (with DST) | `NZDT-12NZST,M9.5.0/2,M4.1.0/3` |
+| São Paulo | `BRT3` |
+| Buenos Aires | `ART3` |
+| Cairo | `EET-2EEST,M4.last.4/24,M10.last.4/24` |
+| Jerusalem | `IST-2IDT,M3.4.4/26,M10.5.0` |
+| South Africa (Johannesburg) | `SAST-2` |
+| Turkey (Istanbul) | `TRT-3` |
+
+The timezone is stored in NVS and pushed to the client on every upload, so both devices display the same local time.
+
 ### ENS160
 
 ENS160 requires ~3 minutes of warm-up for the first reading and ~1 hour to stabilize.
@@ -405,7 +481,7 @@ To disable ENS160 at compile time:
 | `components/display/` | C wrapper for SSD1306 OLED driver (128×32, I2C) |
 | `components/sensors/` | ENS160 (eCO₂, TVOC, AQI) + AHT21 (T, RH) I2C drivers |
 | `components/fonts/` | Bitmap font library (GLCD 5x7, Terminus, Roboto, Bitocra) |
-| `components/wifi/` | WiFi manager for STA, AP, and AP+STA fallback |
+| `components/wifi/` | WiFi manager for STA-only with retry logic |
 
 ## Data Flow
 
@@ -417,7 +493,7 @@ ENS160 + AHT21 → sensor_read()
         ▼
 data_storage_append()  ← SPIFFS ring buffer
         │
-        ▼ (every 30s, via router)
+        ▼ (every sync interval, default 600s, via router)
 UDP broadcast → port 5000 → discovery
         │
         ▼
@@ -433,11 +509,21 @@ wifi_sync_upload()  ─── POST /api/upload?id=<id> ──→  data_store_app
 1. Client sends `AIRMON_DISCOVER` to UDP broadcast:5000
 2. Server responds with `AIRMON_RESPONSE <ip>`
 3. Client caches the IP and uses it for all upload requests
-4. On upload error → rediscovery on the next sync cycle
+4. If broadcast is blocked, client falls back to `SERVER_IP` from `wifi.env`
+5. On upload error → rediscovery on the next sync cycle
+
+**Server Config Push:**
+Each upload response includes the current `timestamp`, `sync_interval`, `name`, and `timezone`. The client applies these immediately:
+- System time is set from the server timestamp
+- Sync interval is updated (default 600 s, configurable via web UI/API)
+- Assigned name is shown briefly on the OLED and used in the web UI
+- Timezone is applied so the OLED clock matches the server
 
 ## Project Structure
 
 ```
+├── cmake/                    # CMake helpers
+│   └── wifi_config.cmake     # Loads wifi.env at build time
 ├── components/               # Shared IDF-style components
 │   ├── display/              # SSD1306 OLED driver + C wrapper
 │   ├── sensors/              # ENS160 + AHT21 I2C drivers
@@ -447,7 +533,9 @@ wifi_sync_upload()  ─── POST /api/upload?id=<id> ──→  data_store_app
 │   ├── server/               # Server firmware (16MB flash)
 │   │   └── main/             # main.c, data_store.c, client_registry.c, http_server.c
 │   └── client/               # Client firmware (4MB flash)
-│       └── main/             # main.c, data_storage.c, wifi_sync.c, button.c
+│       ├── main/             # main.c, data_storage.c, wifi_sync.c, button.c
+│       └── partitions_client.csv
+├── wifi.env                  # WiFi credentials (gitignored)
 ├── README.md
 ├── AGENTS.md
 └── TODO.md

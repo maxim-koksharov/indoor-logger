@@ -60,3 +60,6 @@ sdkconfig*
 .cache/
 .config/
 .local/
+
+# wifi data
+wifi.env
