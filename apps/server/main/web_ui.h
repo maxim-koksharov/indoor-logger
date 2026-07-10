@@ -35,7 +35,7 @@ tr:hover { background: #333; cursor: pointer; }
 .controls button:not(:last-child) { border-right: none; }
 .chart-box { margin-bottom: 20px; }
 .chart-box h3 { color: #4CAF50; margin-bottom: 8px; font-size: 0.95em; }
-canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; display: block; }
+canvas { width: 100%; height: 240px; background: #333; border-radius: 6px; display: block; }
 .error-msg { color: #f44336; padding: 10px; }
 .loading { color: #888; }
 .name-edit { background: #333; color: #e0e0e0; border: 1px solid #4CAF50; padding: 4px 8px; font-family: inherit; font-size: 1em; width: 200px; border-radius: 4px; }
@@ -95,6 +95,10 @@ canvas { width: 100%; height: 180px; background: #333; border-radius: 6px; displ
   <input type="text" id="tz-input" value="WET0WEST,M3.5.0/1,M10.5.0/2" style="display:none">
   <button id="tz-save" onclick="saveTimezone()">Save</button>
   <span id="tz-status"></span>
+</div>
+<div class="sync-settings">
+  <button onclick="exportCSV()" style="background:#4CAF50;color:#fff;border:none;padding:8px 18px;cursor:pointer;font-family:inherit;border-radius:4px;font-size:0.95em;">Export CSV (all data)</button>
+  <span id="export-status" style="margin-left:10px;color:#888;"></span>
 </div>
 <div id="error-bar"></div>
 <table id="clients">
@@ -412,35 +416,46 @@ function drawAllCharts() {
       var canvas = document.getElementById(id);
       var ctx = canvas.getContext('2d');
       if (canvas.offsetWidth > 0) canvas.width = canvas.offsetWidth;
-      canvas.height = 180;
+      canvas.height = 240;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = '#888';
       ctx.font = '14px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText('Insufficient data for selected range', canvas.width / 2, 95);
+      ctx.fillText('Insufficient data for selected range', canvas.width / 2, 120);
     });
     return;
   }
-  drawChart('ch-temp', filtered, 'temp', 'Temperature', '°C', '#4CAF50');
+  drawChart('ch-temp', filtered, 'temp', 'Temperature', '\u00B0C', '#4CAF50');
   drawChart('ch-hum', filtered, 'hum', 'Humidity', '%', '#2196F3');
   if (!currentBasicMode) {
     drawChart('ch-eco2', filtered, 'eco2', 'eCO2', ' ppm', '#FFC107');
     drawChart('ch-tvoc', filtered, 'tvoc', 'TVOC', ' ppb', '#FF9800');
     drawChart('ch-aqi', filtered, 'aqi', 'AQI', '', '#9C27B0');
   }
+  setupTooltip('ch-temp');
+  setupTooltip('ch-hum');
+  if (!currentBasicMode) {
+    setupTooltip('ch-eco2');
+    setupTooltip('ch-tvoc');
+    setupTooltip('ch-aqi');
+  }
 }
+
+var chartMeta = {};
+
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 
 function drawChart(canvasId, data, key, label, unit, color) {
   var canvas = document.getElementById(canvasId);
   if (!canvas) return;
   var ctx = canvas.getContext('2d');
   if (canvas.offsetWidth > 0) canvas.width = canvas.offsetWidth;
-  canvas.height = 180;
+  canvas.height = 240;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  var pad = 50;
-  var w = canvas.width - pad * 2;
-  var h = canvas.height - pad * 2;
+  var topPad = 38, bottomPad = 35, leftPad = 52, rightPad = 15;
+  var w = canvas.width - leftPad - rightPad;
+  var h = canvas.height - topPad - bottomPad;
   if (w < 20 || h < 20) return;
 
   var values = data.map(function(d) { return d[key]; });
@@ -450,37 +465,171 @@ function drawChart(canvasId, data, key, label, unit, color) {
   var range = max - min;
 
   var since = Math.floor(Date.now() / 1000) - currentTimeRange * 3600;
-  var timeEnd = since + currentTimeRange * 3600;
+  var totalSec = currentTimeRange * 3600;
 
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.beginPath();
   for (var i = 0; i < data.length; i++) {
-    var x = pad + ((data[i].timestamp - since) / (currentTimeRange * 3600)) * w;
-    var y = pad + h - ((data[i][key] - min) / range) * h;
+    var x = leftPad + ((data[i].timestamp - since) / totalSec) * w;
+    var y = topPad + h - ((data[i][key] - min) / range) * h;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
 
   ctx.fillStyle = '#888';
-  ctx.font = '12px monospace';
-  if (Number.isInteger(values[0])) {
-    ctx.fillText(max.toFixed(0) + unit, 5, pad + 12);
-    ctx.fillText(min.toFixed(0) + unit, 5, pad + h);
-  } else {
-    ctx.fillText(max.toFixed(1) + unit, 5, pad + 12);
-    ctx.fillText(min.toFixed(1) + unit, 5, pad + h);
-  }
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(Number.isInteger(values[0]) ? max.toFixed(0) + unit : max.toFixed(1) + unit, 2, topPad + 12);
+  ctx.fillText(Number.isInteger(values[0]) ? min.toFixed(0) + unit : min.toFixed(1) + unit, 2, topPad + h);
 
   ctx.strokeStyle = '#555';
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
   ctx.beginPath();
-  ctx.moveTo(pad, pad + h / 2);
-  ctx.lineTo(pad + w, pad + h / 2);
+  ctx.moveTo(leftPad, topPad + h / 2);
+  ctx.lineTo(leftPad + w, topPad + h / 2);
   ctx.stroke();
   ctx.setLineDash([]);
+
+  var dateMap = {};
+  for (var i = 0; i < data.length; i++) {
+    var dd = new Date(data[i].timestamp * 1000);
+    var dk = dd.getFullYear() + '-' + dd.getMonth() + '-' + dd.getDate();
+    if (!dateMap[dk]) {
+      dateMap[dk] = {
+        label: pad2(dd.getDate()) + '.' + pad2(dd.getMonth()+1) + '.' + dd.getFullYear(),
+        ts: data[i].timestamp
+      };
+    }
+  }
+  var dates = [];
+  for (var k in dateMap) dates.push(dateMap[k]);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  if (dates.length === 1) {
+    ctx.fillText(dates[0].label, leftPad + w / 2, topPad - 14);
+  } else {
+    for (var i = 0; i < dates.length; i++) {
+      var dx = leftPad + ((dates[i].ts - since) / totalSec) * w;
+      if (dx >= leftPad - 10 && dx <= leftPad + w + 10) {
+        ctx.fillText(dates[i].label, dx, topPad - 14);
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(dx, topPad);
+        ctx.lineTo(dx, topPad + h);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  var stepSec;
+  if (currentTimeRange <= 3) stepSec = 1800;
+  else if (currentTimeRange <= 6) stepSec = 3600;
+  else if (currentTimeRange <= 12) stepSec = 7200;
+  else stepSec = 14400;
+
+  var startTime = Math.ceil(since / stepSec) * stepSec;
+  ctx.fillStyle = '#888';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'center';
+  for (var t = startTime; t <= since + totalSec; t += stepSec) {
+    var tx = leftPad + ((t - since) / totalSec) * w;
+    if (tx >= leftPad && tx <= leftPad + w) {
+      var td = new Date(t * 1000);
+      ctx.fillText(pad2(td.getHours()) + ':' + pad2(td.getMinutes()), tx, canvas.height - 8);
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(tx, topPad + h);
+      ctx.lineTo(tx, topPad + h + 4);
+      ctx.stroke();
+    }
+  }
+
+  chartMeta[canvasId] = {data:data, key:key, min:min, range:range, since:since, totalSec:totalSec, unit:unit, color:color, topPad:topPad, leftPad:leftPad, w:w, h:h};
+}
+
+function drawTooltipOverlay(canvasId, ptIndex) {
+  var meta = chartMeta[canvasId];
+  if (!meta) return;
+  var canvas = document.getElementById(canvasId);
+  var ctx = canvas.getContext('2d');
+  var pt = meta.data[ptIndex];
+  var val = pt[meta.key];
+
+  var px = meta.leftPad + ((pt.timestamp - meta.since) / meta.totalSec) * meta.w;
+  var py = meta.topPad + meta.h - ((val - meta.min) / meta.range) * meta.h;
+
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(px, meta.topPad);
+  ctx.lineTo(px, meta.topPad + meta.h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.arc(px, py, 4, 0, Math.PI * 2);
+  ctx.fillStyle = meta.color;
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  var dt = new Date(pt.timestamp * 1000);
+  var dateStr = pad2(dt.getDate()) + '.' + pad2(dt.getMonth()+1) + '.' + dt.getFullYear();
+  var timeStr = pad2(dt.getHours()) + ':' + pad2(dt.getMinutes());
+  var valStr = Number.isInteger(val) ? val.toString() : val.toFixed(1);
+  var text = dateStr + ' ' + timeStr + '  ' + valStr + meta.unit;
+
+  ctx.font = '12px monospace';
+  var tw = ctx.measureText(text).width;
+  var boxX = px + 10;
+  var boxY = py - 28;
+  if (boxX + tw + 12 > meta.leftPad + meta.w) boxX = px - tw - 18;
+  if (boxY < meta.topPad) boxY = py + 12;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(boxX, boxY, tw + 14, 24);
+  ctx.strokeStyle = meta.color;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(boxX, boxY, tw + 14, 24);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(text, boxX + 7, boxY + 16);
+}
+
+function setupTooltip(canvasId) {
+  var canvas = document.getElementById(canvasId);
+  canvas.onmousemove = function(e) {
+    var meta = chartMeta[canvasId];
+    if (!meta || !meta.data || meta.data.length < 2) return;
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / rect.width;
+    var mx = (e.clientX - rect.left) * scaleX;
+    var relX = mx - meta.leftPad;
+    if (relX < 0 || relX > meta.w) { canvas.onmouseleave(); return; }
+    var ts = meta.since + (relX / meta.w) * meta.totalSec;
+    var closest = 0, closestDist = Infinity;
+    for (var i = 0; i < meta.data.length; i++) {
+      var d = Math.abs(meta.data[i].timestamp - ts);
+      if (d < closestDist) { closestDist = d; closest = i; }
+    }
+    drawChart(canvasId, meta.data, meta.key, '', meta.unit, meta.color);
+    drawTooltipOverlay(canvasId, closest);
+  };
+  canvas.onmouseleave = function() {
+    var meta = chartMeta[canvasId];
+    if (meta) drawChart(canvasId, meta.data, meta.key, '', meta.unit, meta.color);
+  };
 }
 
 async function fetchData(id, rangeHours) {
@@ -598,6 +747,14 @@ async function setTimeRange(hours) {
       setError('Failed to load data: ' + e.message);
     }
   }
+}
+
+function exportCSV() {
+  var status = document.getElementById('export-status');
+  status.textContent = 'Downloading...';
+  status.style.color = '#888';
+  window.location.href = '/api/export/csv';
+  setTimeout(function() { status.textContent = ''; }, 5000);
 }
 
 setInterval(function() { fetchStatus(); fetchClients(); }, 5000);

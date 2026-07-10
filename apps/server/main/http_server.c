@@ -790,6 +790,82 @@ static esp_err_t data_aggregated_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t csv_export_handler(httpd_req_t *req) {
+    time_t now = time(NULL);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    char filename[64];
+    strftime(filename, sizeof(filename), "airmon_%Y-%m-%d_%H-%M-%S.csv", &tm_info);
+
+    httpd_resp_set_type(req, "text/csv; charset=utf-8");
+    char disposition[128];
+    snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", filename);
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+
+    httpd_resp_send_chunk(req, "\xEF\xBB\xBF", 3);
+    httpd_resp_send_chunk(req, "client_name,timestamp,datetime,temp,hum,eco2,tvoc,aqi\r\n", 55);
+
+    client_info_t *clients = malloc(CLIENT_REGISTRY_MAX_CLIENTS * sizeof(client_info_t));
+    if (!clients) {
+        httpd_resp_send_chunk(req, NULL, 0);
+        return ESP_OK;
+    }
+    int count = client_registry_get_all(clients, CLIENT_REGISTRY_MAX_CLIENTS);
+
+    char chunk[512];
+    int total_sent = 0;
+
+    for (int c = 0; c < count; c++) {
+        const char *cname = clients[c].name[0] ? clients[c].name : clients[c].id;
+        char filepath[64];
+        snprintf(filepath, sizeof(filepath), "/spiffs/%s.dat", clients[c].id);
+
+        FILE *f = fopen(filepath, "r");
+        if (!f) continue;
+
+        client_file_header_t header;
+        if (fread(&header, 1, sizeof(header), f) != sizeof(header) ||
+            header.magic != DATA_STORE_MAGIC) {
+            fclose(f);
+            continue;
+        }
+
+        uint32_t rec_count = header.count;
+        if (rec_count > header.max_records) rec_count = header.max_records;
+
+        data_record_t rec;
+        for (uint32_t i = 0; i < rec_count; i++) {
+            if (fread(&rec, 1, sizeof(rec), f) != sizeof(rec)) break;
+
+            struct tm rt;
+            localtime_r((time_t *)&rec.timestamp, &rt);
+            char dt[24];
+            strftime(dt, sizeof(dt), "%Y-%m-%d %H:%M:%S", &rt);
+
+            int t_int = rec.temp_x100 / 100;
+            int t_dec = rec.temp_x100 % 100;
+            if (t_dec < 0) t_dec = -t_dec;
+
+            int len = snprintf(chunk, sizeof(chunk), "%s,%lu,%s,%d.%02d,%u.%02d,%u,%u,%u\r\n",
+                cname,
+                (unsigned long)rec.timestamp,
+                dt,
+                t_int, t_dec,
+                rec.hum_x100 / 100, rec.hum_x100 % 100,
+                rec.eco2, rec.tvoc, rec.aqi);
+
+            httpd_resp_send_chunk(req, chunk, len);
+            total_sent++;
+        }
+        fclose(f);
+    }
+
+    httpd_resp_send_chunk(req, NULL, 0);
+    free(clients);
+    ESP_LOGI(TAG, "CSV export: sent %d records from %d clients", total_sent, count);
+    return ESP_OK;
+}
+
 int http_server_init(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
@@ -933,6 +1009,13 @@ int http_server_start(void) {
     };
     httpd_register_uri_handler(server, &timezone_post_uri);
 
-    ESP_LOGI(TAG, "HTTP server started with 14 endpoints");
+    httpd_uri_t csv_uri = {
+        .uri = "/api/export/csv",
+        .method = HTTP_GET,
+        .handler = csv_export_handler
+    };
+    httpd_register_uri_handler(server, &csv_uri);
+
+    ESP_LOGI(TAG, "HTTP server started with 15 endpoints");
     return 0;
 }

@@ -31,6 +31,24 @@ static uint32_t s_retry_delay_sec = 60;
 static int32_t s_last_disconnect_reason = 0;
 static bool s_wifi_inited = false;
 
+/* Idempotency flags for init_wifi_subsystem(): these subsystems can only be
+ * initialised once per boot. Re-initialising them (e.g. after esp_wifi_deinit
+ * followed by another wifi_manager_init_sta_dual call) triggers abort() inside
+ * ESP_ERROR_CHECK because esp_event_loop_create_default() and tcpip_adapter_init()
+ * return ESP_ERR_INVALID_STATE. */
+static bool s_event_loop_inited = false;
+static bool s_tcpip_inited = false;
+static bool s_nvs_inited = false;
+
+/* Dedicated task for delayed WiFi reconnects. The system event handler must
+ * never block (vTaskDelay in the event task breaks WiFi state machine and can
+ * trigger watchdog / abort). Instead it signals this task which performs the
+ * delay outside the event loop. */
+static TaskHandle_t s_retry_task_handle = NULL;
+static volatile bool s_retry_pending = false;
+static volatile uint32_t s_retry_delay_pending_sec = 0;
+static volatile bool s_retry_switch_network = false;
+
 #define MAX_CONSECUTIVE_NO_AP 3
 #define FAILOVER_THRESHOLD 2
 #define STA_CONNECTED_BIT BIT0
@@ -225,13 +243,22 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                     switched = scan_and_select_best();
                 }
 
+                /* Hand off the delayed reconnect to a dedicated task. The system
+                 * event handler must NOT block on vTaskDelay — that would freeze
+                 * WiFi state machine and can crash the device. */
                 uint32_t delay = switched ? 5 : s_retry_delay_sec;
-                vTaskDelay(pdMS_TO_TICKS(delay * 1000));
-
-                if (switched) {
-                    apply_active_config();
+                s_retry_delay_pending_sec = delay;
+                s_retry_switch_network = switched;
+                s_retry_pending = true;
+                if (s_retry_task_handle) {
+                    xTaskNotifyGive(s_retry_task_handle);
+                } else {
+                    /* Retry task not started (shouldn't happen after init).
+                     * Fall back to immediate connect to avoid getting stuck. */
+                    ESP_LOGW(TAG, "Retry task unavailable, connecting immediately");
+                    if (switched) apply_active_config();
+                    esp_wifi_connect();
                 }
-                esp_wifi_connect();
                 break;
             }
             case WIFI_EVENT_AP_START: {
@@ -267,23 +294,92 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static esp_err_t init_wifi_subsystem(void) {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+/* Retry task: performs the delayed esp_wifi_connect() that used to live inside
+ * the system event handler. Blocking the event task on vTaskDelay is unsafe and
+ * can break the WiFi state machine; moving the delay here keeps the event
+ * handler short and predictable. */
+static void wifi_retry_task(void *pvParameters) {
+    (void)pvParameters;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (!s_retry_pending) continue;
 
-    tcpip_adapter_init();
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+        bool switched = s_retry_switch_network;
+        uint32_t delay_sec = s_retry_delay_pending_sec;
+        s_retry_pending = false;
+        s_retry_switch_network = false;
+        s_retry_delay_pending_sec = 0;
+
+        ESP_LOGI(TAG, "Retry task: waiting %u sec before reconnect", delay_sec);
+        for (uint32_t i = 0; i < delay_sec; i++) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            if (!s_retry_pending) break;  /* cancelled by a new event */
+        }
+
+        if (s_retry_pending) {
+            /* A newer disconnect arrived during the wait. The newer request
+             * will trigger its own retry after we return. */
+            continue;
+        }
+
+        if (switched) {
+            apply_active_config();
+        }
+        esp_wifi_connect();
+    }
+}
+
+static void start_retry_task_if_needed(void) {
+    if (s_retry_task_handle) return;
+    BaseType_t ok = xTaskCreate(wifi_retry_task, "wifi_retry", 2048, NULL, 4, &s_retry_task_handle);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start wifi_retry task");
+        s_retry_task_handle = NULL;
+    }
+}
+
+static esp_err_t init_wifi_subsystem(void) {
+    /* nvs_flash_init: safe to call multiple times. */
+    if (!s_nvs_inited) {
+        esp_err_t ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            ret = nvs_flash_init();
+        }
+        ESP_ERROR_CHECK(ret);
+        s_nvs_inited = true;
+    }
+
+    /* tcpip_adapter_init: must only be called once. */
+    if (!s_tcpip_inited) {
+        tcpip_adapter_init();
+        s_tcpip_inited = true;
+    }
+
+    /* esp_event_loop_create_default: must only be called once. If the loop
+     * already exists (e.g. after esp_wifi_deinit + re-init), ignore
+     * ESP_ERR_INVALID_STATE. */
+    if (!s_event_loop_inited) {
+        esp_err_t ret = esp_event_loop_create_default();
+        if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+            s_event_loop_inited = true;
+        } else {
+            ESP_ERROR_CHECK(ret);
+        }
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+    /* Register handlers unconditionally; esp_event is idempotent for repeated
+     * identical registrations on different versions, but we guard against
+     * duplicates by tracking the registered state below. */
+    esp_err_t h1 = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+    esp_err_t h2 = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+    if (h1 != ESP_OK && h1 != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(h1);
+    if (h2 != ESP_OK && h2 != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(h2);
 
+    start_retry_task_if_needed();
     return ESP_OK;
 }
 
