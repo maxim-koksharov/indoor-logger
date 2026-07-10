@@ -421,7 +421,7 @@ void app_main(void) {
     // Self-test summary
     {
         uint32_t spiffs_total = 0, spiffs_used = 0;
-        esp_err_t spiffs_ret = esp_spiffs_info(NULL, &spiffs_total, &spiffs_used);
+        esp_err_t spiffs_ret = esp_spiffs_info("storage", &spiffs_total, &spiffs_used);
         bool sntp_ok = (time(NULL) > 0);
         ESP_LOGI(TAG, "=== SELF-TEST ===");
         ESP_LOGI(TAG, "  SPIFFS: %s (total=%u used=%u)",

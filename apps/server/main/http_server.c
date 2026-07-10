@@ -354,7 +354,8 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
     get_client_ip(req, client_ip, sizeof(client_ip));
     client_registry_update(client_id,
                            client_name[0] ? client_name : NULL,
-                           client_ip);
+                           client_ip,
+                           false);
     client_registry_save();
 
     const char *resolved_id = client_registry_resolve_id(client_id);
@@ -550,7 +551,7 @@ static esp_err_t client_name_get_handler(httpd_req_t *req) {
     }
 
     const char *resolved = client_registry_resolve_id(client_id);
-    if (client_registry_update(resolved, name, NULL) != 0) {
+    if (client_registry_update(resolved, name, NULL, true) != 0) {
         httpd_resp_send_500(req);
         return ESP_OK;
     }
@@ -625,7 +626,7 @@ static esp_err_t client_id_post_handler(httpd_req_t *req) {
 
 static esp_err_t storage_get_handler(httpd_req_t *req) {
     size_t total = 0, used = 0;
-    esp_err_t ret = esp_spiffs_info(NULL, &total, &used);
+    esp_err_t ret = esp_spiffs_info("storage", &total, &used);
     if (ret != ESP_OK) {
         httpd_resp_send_500(req);
         return ESP_OK;
@@ -712,7 +713,7 @@ static esp_err_t client_basic_mode_post_handler(httpd_req_t *req) {
     }
 
     if (client_registry_set_basic_mode(client_id, v == 1) != 0) {
-        client_registry_update(client_id, NULL, NULL);
+        client_registry_update(client_id, NULL, NULL, false);
     }
     if (client_registry_set_basic_mode(client_id, v == 1) != 0) {
         httpd_resp_set_type(req, "text/plain");

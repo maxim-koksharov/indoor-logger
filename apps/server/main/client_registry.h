@@ -35,12 +35,17 @@ typedef struct {
 int client_registry_init(void);
 
 /** @brief Register or update a client's presence.
- *  @param id   Client identifier (required).
- *  @param name Optional display name (can be NULL or empty).
- *  @param ip   Optional IP string (can be NULL or empty).
+ *  @param id            Client identifier (required).
+ *  @param name          Optional display name (can be NULL or empty).
+ *  @param ip            Optional IP string (can be NULL or empty).
+ *  @param overwrite_name If true, always replace the stored name with @p name
+ *                       (when @p name is non-NULL and non-empty). If false,
+ *                       only set the name when the client is new or its
+ *                       stored name is empty — protecting user-assigned names
+ *                       from being clobbered by client uploads.
  *  @return 0 on success, -1 if the registry is full.
  */
-int client_registry_update(const char *id, const char *name, const char *ip);
+int client_registry_update(const char *id, const char *name, const char *ip, bool overwrite_name);
 
 /** @brief Look up a client by ID.
  *  @param id Client identifier.

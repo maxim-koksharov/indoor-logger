@@ -90,7 +90,7 @@ void client_registry_clear_id_mapping(const char *old_id) {
     }
 }
 
-int client_registry_update(const char *id, const char *name, const char *ip) {
+int client_registry_update(const char *id, const char *name, const char *ip, bool overwrite_name) {
     client_info_t *c = client_registry_get(id);
 
     if (c == NULL && ip && ip[0]) {
@@ -128,7 +128,7 @@ int client_registry_update(const char *id, const char *name, const char *ip) {
         basic_modes[idx] = true;
     }
 
-    if (name && name[0]) {
+    if (name && name[0] && (overwrite_name || c->name[0] == '\0')) {
         strncpy(c->name, name, CLIENT_REGISTRY_NAME_LEN - 1);
     }
 

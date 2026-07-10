@@ -11,7 +11,9 @@ extern "C" {
 #define DATA_STORE_MAGIC 0x44415441
 #define DATA_STORE_VERSION 1
 #define DATA_STORE_MAX_CLIENTS 16
-#define DATA_STORE_MAX_RECORDS_PER_CLIENT 10000
+
+/* Max records per client is computed at runtime from the SPIFFS partition
+ * size. There is no compile-time limit. */
 
 /** @brief A single sensor data record (packed to 14 bytes). */
 typedef struct __attribute__((packed)) {
@@ -38,6 +40,11 @@ typedef struct __attribute__((packed)) {
  *  @return 0 on success, -1 on failure (SPIFFS mount failed).
  */
 int data_store_init(void);
+
+/** @brief Get the per-client ring buffer capacity computed from the SPIFFS
+ *         partition size at init time. Returns 0 if data_store_init() has
+ *         not been called or failed. */
+uint32_t data_store_get_max_records_per_client(void);
 
 /** @brief Append a record to a client's ring buffer file.
  *  @param client_id  Client identifier (used as filename: /spiffs/<id>.dat).
