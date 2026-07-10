@@ -331,7 +331,7 @@ static void wifi_retry_task(void *pvParameters) {
 
 static void start_retry_task_if_needed(void) {
     if (s_retry_task_handle) return;
-    BaseType_t ok = xTaskCreate(wifi_retry_task, "wifi_retry", 2048, NULL, 4, &s_retry_task_handle);
+    BaseType_t ok = xTaskCreate(wifi_retry_task, "wifi_retry", 4096, NULL, 4, &s_retry_task_handle);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "Failed to start wifi_retry task");
         s_retry_task_handle = NULL;

@@ -429,6 +429,7 @@ static void client_task(void *pvParameters) {
     int initial_polls_remaining = 6;
     bool woke_by_button = false;
     bool woke_by_timer = false;
+    static bool s_prev_button_raw = true; /* start released (pull-up = HIGH) */
 
     display_off(&display);
 
@@ -648,8 +649,13 @@ static void client_task(void *pvParameters) {
                 break;
         }
 
-        if (button_pressed && !display_active) {
-            ESP_LOGI(TAG, "[BUTTON] Turning display ON");
+        bool button_raw = button_is_pressed();
+        bool button_falling_edge = (!s_prev_button_raw && button_raw);
+        s_prev_button_raw = button_raw;
+
+        if ((button_pressed || button_falling_edge) && !display_active) {
+            ESP_LOGI(TAG, "[BUTTON] Turning display ON (debounced=%d raw_edge=%d)",
+                     button_pressed, button_falling_edge);
             display_active = true;
             int max_screens = wifi_sync_is_basic_mode() ? 2 : 3;
             uint32_t on_ms = DISPLAY_SCREEN_INTERVAL_MS * max_screens;
@@ -867,13 +873,11 @@ void app_main(void) {
     }
 
     // Create client task with 4KB stack
-    xTaskCreate(client_task, "client_task", 8192, NULL, 5, &client_task_handle);
+    xTaskCreate(client_task, "client_task", 12288, NULL, 5, &client_task_handle);
     button_set_task_handle(client_task_handle);
     
     ESP_LOGI(TAG, "Client task created");
     
-    // Main loop just idles
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    // app_main done — delete this task (don't idle-loop, known rst cause:2 on ESP8266)
+    vTaskDelete(NULL);
 }

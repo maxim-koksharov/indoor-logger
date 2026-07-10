@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include "esp_task_wdt.h"
 
 static const char *TAG = "wifi_sync";
 static char s_client_id[32] = {0};
@@ -203,6 +204,7 @@ esp_err_t wifi_sync_discover_server(uint32_t timeout_ms) {
     if (per_probe_timeout < 3000) per_probe_timeout = 3000;
 
     for (int p = 0; p < probes; p++) {
+        esp_task_wdt_reset();
         int sent = sendto(sock, discover_msg, strlen(discover_msg), 0,
                           (struct sockaddr *)&dest, sizeof(dest));
         if (sent < 0) {
@@ -269,6 +271,7 @@ esp_err_t wifi_sync_connect_to_server(const char *ssid1, const char *pass1,
 
     int retry = 0;
     while (!wifi_manager_is_connected() && retry < 30) {
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1000));
         retry++;
     }
