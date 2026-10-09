@@ -8,13 +8,17 @@
 #define DEBOUNCE_TIME_MS 50
 #define LONG_PRESS_IGNORE_MS 5000
 
-static const char *TAG = "button";
 static bool last_button_state = false;
 static TickType_t last_state_change_time = 0;
 static bool debounced_state = false;
 static bool long_press_ignore = false;
 static TickType_t press_start_time = 0;
 static bool press_reported = false;
+
+static bool s_pressed_flag = false;
+static bool s_press_pending = false;
+static uint32_t s_isr_count = 0;
+static TaskHandle_t s_notify_task = NULL;
 
 void button_init(void) {
     gpio_config_t io_conf = {
@@ -42,10 +46,13 @@ void button_init(void) {
     debounced_state = last_button_state;
     long_press_ignore = false;
     press_reported = false;
+    s_pressed_flag = false;
+    s_press_pending = false;
+    s_isr_count = 0;
 }
 
 void button_set_task_handle(TaskHandle_t task) {
-    (void)task;
+    s_notify_task = task;
 }
 
 bool button_is_pressed(void) {
@@ -58,18 +65,28 @@ bool button_is_pressed(void) {
 }
 
 bool button_was_pressed(void) {
-    return false;
+    bool ret = s_press_pending;
+    s_press_pending = false;
+    /* Also clear press_reported so a held button can re-trigger display;
+     * cooldown via LONG_PRESS_IGNORE prevents rapid cycling. */
+    if (press_reported && debounced_state) {
+        press_reported = false;
+    }
+    return ret;
 }
 
 bool button_is_pressed_flag(void) {
-    return false;
+    bool ret = s_pressed_flag;
+    s_pressed_flag = false;
+    return ret;
 }
 
 void button_set_pressed_flag(void) {
+    s_pressed_flag = true;
 }
 
 uint32_t button_get_isr_count(void) {
-    return 0;
+    return s_isr_count;
 }
 
 bool button_is_pressed_debounced(void) {
@@ -82,9 +99,6 @@ bool button_is_pressed_debounced(void) {
         last_state_change_time = now;
         if (current_state) {
             press_start_time = now;
-            // Force a fresh debounce cycle for this new press. This handles
-            // the case where the user releases after a long press and quickly
-            // presses again while debounced_state was still true.
             debounced_state = false;
             press_reported = false;
             long_press_ignore = false;
@@ -98,6 +112,7 @@ bool button_is_pressed_debounced(void) {
         }
         if (debounced_state && !press_reported && !long_press_ignore) {
             press_reported = true;
+            s_press_pending = true;
             result = true;
         }
     }

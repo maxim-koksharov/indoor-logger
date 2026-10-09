@@ -9,6 +9,17 @@
 
 static const char *TAG = "data_store";
 
+/* Reserve this many bytes of SPIFFS for metadata, GC, and look-up tables. */
+#define SPIFFS_RESERVE_BYTES (32 * 1024)
+
+/* Computed at init from SPIFFS total size and DATA_STORE_MAX_CLIENTS.
+ * Each per-client ring buffer uses this many records. */
+static uint32_t g_max_records_per_client = 0;
+
+uint32_t data_store_get_max_records_per_client(void) {
+    return g_max_records_per_client;
+}
+
 static void get_filepath(const char *client_id, char *buf, size_t len) {
     snprintf(buf, len, "/spiffs/%s.dat", client_id);
 }
@@ -16,7 +27,7 @@ static void get_filepath(const char *client_id, char *buf, size_t len) {
 int data_store_init(void) {
     esp_vfs_spiffs_conf_t conf = {
         .base_path = "/spiffs",
-        .partition_label = NULL,
+        .partition_label = "storage",
         .max_files = 5,
         .format_if_mount_failed = true
     };
@@ -28,10 +39,26 @@ int data_store_init(void) {
     }
 
     size_t total = 0, used = 0;
-    ret = esp_spiffs_info(NULL, &total, &used);
+    ret = esp_spiffs_info("storage", &total, &used);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "SPIFFS total: %d, used: %d", total, used);
+        ESP_LOGI(TAG, "SPIFFS total: %u, used: %u", (unsigned)total, (unsigned)used);
     }
+
+    if (total <= SPIFFS_RESERVE_BYTES) {
+        ESP_LOGE(TAG, "SPIFFS partition too small: total=%u", (unsigned)total);
+        return -1;
+    }
+    size_t usable = total - SPIFFS_RESERVE_BYTES;
+    size_t per_client = usable / DATA_STORE_MAX_CLIENTS;
+    if (per_client <= sizeof(client_file_header_t)) {
+        ESP_LOGE(TAG, "SPIFFS too small for %d clients", DATA_STORE_MAX_CLIENTS);
+        return -1;
+    }
+    per_client -= sizeof(client_file_header_t);
+    g_max_records_per_client = (uint32_t)(per_client / sizeof(data_record_t));
+    ESP_LOGI(TAG, "Max records per client: %u (record size %u, %d clients)",
+             (unsigned)g_max_records_per_client, (unsigned)sizeof(data_record_t),
+             DATA_STORE_MAX_CLIENTS);
 
     return 0;
 }
@@ -60,7 +87,7 @@ int data_store_append(const char *client_id, const data_record_t *rec) {
         header.magic = DATA_STORE_MAGIC;
         header.version = DATA_STORE_VERSION;
         strncpy(header.client_id, client_id, sizeof(header.client_id) - 1);
-        header.max_records = DATA_STORE_MAX_RECORDS_PER_CLIENT;
+        header.max_records = g_max_records_per_client;
         header.write_idx = 0;
         header.count = 0;
 
@@ -211,6 +238,68 @@ int data_store_delete_client(const char *client_id) {
     }
 
     ESP_LOGI(TAG, "Deleted client data: %s", client_id);
+    return 0;
+}
+
+int data_store_rename_client(const char *old_id, const char *new_id) {
+    if (!old_id || !old_id[0] || !new_id || !new_id[0]) return -1;
+    if (strcmp(old_id, new_id) == 0) return 0;
+
+    char old_path[64], new_path[64];
+    get_filepath(old_id, old_path, sizeof(old_path));
+    get_filepath(new_id, new_path, sizeof(new_path));
+
+    FILE *f_old = fopen(old_path, "r");
+    if (f_old == NULL) {
+        ESP_LOGW(TAG, "Rename: no data file for %s", old_id);
+        return 0;
+    }
+
+    client_file_header_t header;
+    if (fread(&header, 1, sizeof(header), f_old) != sizeof(header) ||
+        header.magic != DATA_STORE_MAGIC) {
+        ESP_LOGE(TAG, "Rename: invalid header in %s", old_path);
+        fclose(f_old);
+        return -1;
+    }
+
+    FILE *f_new = fopen(new_path, "w+");
+    if (f_new == NULL) {
+        ESP_LOGE(TAG, "Rename: failed to create %s", new_path);
+        fclose(f_old);
+        return -1;
+    }
+
+    strncpy(header.client_id, new_id, sizeof(header.client_id) - 1);
+    header.client_id[sizeof(header.client_id) - 1] = '\0';
+
+    if (fwrite(&header, 1, sizeof(header), f_new) != sizeof(header)) {
+        ESP_LOGE(TAG, "Rename: failed to write header");
+        fclose(f_old);
+        fclose(f_new);
+        unlink(new_path);
+        return -1;
+    }
+
+    data_record_t rec;
+    while (fread(&rec, 1, sizeof(rec), f_old) == sizeof(rec)) {
+        if (fwrite(&rec, 1, sizeof(rec), f_new) != sizeof(rec)) {
+            ESP_LOGE(TAG, "Rename: failed to write record");
+            fclose(f_old);
+            fclose(f_new);
+            unlink(new_path);
+            return -1;
+        }
+    }
+
+    fclose(f_old);
+    fclose(f_new);
+
+    if (unlink(old_path) != 0) {
+        ESP_LOGW(TAG, "Rename: failed to delete old file %s", old_path);
+    }
+
+    ESP_LOGI(TAG, "Renamed data: %s -> %s", old_id, new_id);
     return 0;
 }
 
