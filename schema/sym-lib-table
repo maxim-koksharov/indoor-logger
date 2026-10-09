@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "indoor_logger") (type "KiCad") (uri "/home/max/repo/indoor-logger/schema") (options "") (descr ""))
+)
